@@ -1,4 +1,4 @@
-(ns tg-admin.core
+(ns tgadmin.core
   (:require
     [cheshire.core :as json]
     [clojure.edn :as edn]

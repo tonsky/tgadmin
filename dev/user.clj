@@ -2,12 +2,11 @@
   (:require
     [clojure.core.server :as server]
     [clojure.string :as str]
-    [clojure.test :as test]
     [clojure.tools.namespace.repl :as ns]))
 
 (ns/disable-reload!)
 
-(ns/set-refresh-dirs "src" "dev" "test")
+(ns/set-refresh-dirs "src" "dev")
 
 (def lock
   (Object.))
@@ -44,7 +43,7 @@
 
 (defn -main [& args]
   (alter-var-root #'*command-line-args* (constantly args))
-  (require 'tg-admin.core-test)
+  (require 'tgadmin.core)
   (reload)
   (let [args (apply array-map args)
         port (parse-long (get args "--repl-port" "5555"))]
@@ -55,16 +54,3 @@
        :server-daemon false})
     (println "Started Socket REPL server on port" port)))
 
-(defn test-all []
-  (reload)
-  (let [{:keys [fail error] :as res} (test/run-all-tests #"tg-admin\..*-test")
-        res (dissoc res :type)]
-    (if (pos? (+ fail error))
-      (throw (ex-info "Tests failed" res))
-      res)))
-
-(defn -test [_]
-  (require 'tg-admin.core-test)
-  (reload)
-  (let [{:keys [fail error]} (test/run-all-tests #"tg-admin\..*-test")]
-    (System/exit (+ fail error))))
