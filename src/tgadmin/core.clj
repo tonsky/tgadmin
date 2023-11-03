@@ -20,10 +20,15 @@
         (catch Throwable t
           (.printStackTrace t))))))
 
-(defn schedule [^long delay f]
+(defn schedule-impl [^long delay f]
   (let [t (timer-task f)]
     (.schedule timer t delay)
     #(.cancel t)))
+
+(defmacro schedule [delay & body]
+  `(schedule-impl ~delay
+     (fn []
+       ~@body)))
 
 (def config
   (edn/read-string (slurp "config.edn")))
@@ -58,7 +63,7 @@
        (throw e))
      (catch Exception e
        (.printStackTrace e)
-       nil))))      
+       nil))))
 
 (defn append-user [{:keys [id username first_name last_name]}]
   (swap! *known-users conj id)
@@ -73,43 +78,48 @@
       (.write w (str " " last_name)))
     (.write w "\n")))
 
+(defn sus? [message]
+  (or
+    (some #(contains? message %) [:photo :document :video])
+    (some #(#{"url" "mention"} (:type %)) (:entities message))))
+
 (defn -main [& args]
   (println "[ STARTED ]")
   (loop [offset 0]
     (if-some [updates (post! "/getUpdates" {:offset offset})]
       (do
-        (when (pos? offset) ;; skip first catch-up
-          (doseq [update updates
-                  :let [_       (prn update)
-                        message (:message update)]
-                  :when message
-                  :let [user    (:from message)
-                        user-id (:id user)
-                        chat    (:chat message)
-                        chat-id (:id chat)]
-                  :when (not (@*known-users user-id))]
-            (if (some #(contains? message %) [:entities :photo :document :video])
-              ;; unknown user posting links
-              (do
-                (println "[ BLOCKED ]"
-                  (str "@" (:username user) " -> @" (:username chat) ":")
-                  (cond
-                    (:photo message)    (str "[photo] " (:caption message))
-                    (:video message)    (str "[video] " (:caption message))
-                    (:document message) (str "[document] " (:caption message))
-                    :else               (:text message)))
-                (when-some [resp (post! "/deleteMessage" {:chat_id    chat-id
-                                                          :message_id (:message_id message)})]
-                  (let [text  (str "Хе-хе, сработал антиспам! Напиши обычное сообщение, потом можешь постить ссылки/картинки, @" (:username user))
-                        reply (post! "/sendMessage" {:chat_id chat-id
-                                                     :text    text})]
-                    (schedule 60000
-                      (fn []
-                        (post! "/deleteMessage" {:chat_id    chat-id
-                                                 :message_id (:message_id reply)}))))))
-              ;; unknown user posting text
-              (when (:text message)
-                (append-user user)))))
+        (doseq [update updates
+                :let [_       (prn update)
+                      message (:message update)]
+                :when message
+                :let [user    (:from message)
+                      user-id (:id user)
+                      chat    (:chat message)
+                      chat-id (:id chat)]
+                :when (not (@*known-users user-id))]
+          (if (sus? message)
+            ;; unknown user posting links
+            (do
+              (println "[ BLOCKED ]"
+                (str "@" (:username user) " -> @" (:username chat) ":")
+                (cond
+                  (:photo message)    (str "[photo] " (:caption message))
+                  (:video message)    (str "[video] " (:caption message))
+                  (:document message) (str "[document] " (:caption message))
+                  :else               (:text message))
+                #_(pr-str message))
+              ;; can delete
+              (when-some [resp (post! "/deleteMessage" {:chat_id    chat-id
+                                                        :message_id (:message_id message)})]
+                (let [text  (str "Хе-хе, сработал антиспам! Напиши обычное сообщение, потом можешь постить ссылки/картинки, @" (:username user))
+                      reply (post! "/sendMessage" {:chat_id chat-id
+                                                   :text    text})]
+                  (schedule 60000
+                    (post! "/deleteMessage" {:chat_id    chat-id
+                                             :message_id (:message_id reply)})))))
+            ;; unknown user posting text
+            (when (:text message)
+              (append-user user))))
           
         (if (empty? updates)
           (recur offset)
