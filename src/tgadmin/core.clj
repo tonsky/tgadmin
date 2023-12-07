@@ -78,10 +78,30 @@
       (.write w (str " " last_name)))
     (.write w "\n")))
 
-(defn sus? [message]
+(defn media? [message]
   (or
     (some #(contains? message %) [:photo :document :video])
     (some #(#{"url" "mention"} (:type %)) (:entities message))))
+
+(defn mixed-lang? [message]
+  (or
+    (re-find #"\p{IsLatin}\p{IsCyrillic}+\p{IsLatin}+\p{IsCyrillic}" (:text message))
+    (re-find #"\p{IsCyrillic}\p{IsLatin}+\p{IsCyrillic}+\p{IsLatin}" (:text message))))
+
+(comment
+  (mixed-lang? {:text "Мы ищeм пapтнepoв для тopгoвлu в направленuu арбuтража kрuптовалют. Дaжe бeз oпытa! Гoтoвы yзнaть пoдpoбнoстu? Ждy вac в лuчныx сoобщенuях для обсужденuя."})
+  
+  (mixed-lang {:text "C++ привет С++ привет"}))
+
+(defn delete [chat-id message-id text]
+  (when-some [resp (post! "/deleteMessage" {:chat_id    chat-id
+                                            :message_id message-id})]
+    (let [reply (post! "/sendMessage" {:chat_id    chat-id
+                                       :parse_mode "MarkdownV2"
+                                       :text       text})]
+      (schedule 60000
+        (post! "/deleteMessage" {:chat_id    chat-id
+                                 :message_id (:message_id reply)})))))
 
 (defn -main [& args]
   (println "[ STARTED ]")
@@ -95,29 +115,33 @@
                 :let [user    (:from message)
                       user-id (:id user)
                       chat    (:chat message)
-                      chat-id (:id chat)]
+                      chat-id (:id chat)
+                      mention (if (:username user)
+                                (str "@" (:username user))
+                                (str "[%username%](tg://user?id=" (:id user) ")"))]
                 :when (not (@*known-users user-id))]
-          (if (sus? message)
+          (cond
             ;; unknown user posting links
+            (media? message)
             (do
-              (println "[ BLOCKED ]"
-                (str "@" (:username user) " -> @" (:username chat) ":")
+              (println "[ BLOCKED ]" mention "-> @" (:username chat) ":"
                 (cond
                   (:photo message)    (str "[photo] " (:caption message))
                   (:video message)    (str "[video] " (:caption message))
                   (:document message) (str "[document] " (:caption message))
-                  :else               (:text message))
-                #_(pr-str message))
-              ;; can delete
-              (when-some [resp (post! "/deleteMessage" {:chat_id    chat-id
-                                                        :message_id (:message_id message)})]
-                (let [text  (str "Хе-хе, сработал антиспам! Напиши обычное сообщение, потом можешь постить ссылки/картинки, @" (:username user))
-                      reply (post! "/sendMessage" {:chat_id chat-id
-                                                   :text    text})]
-                  (schedule 60000
-                    (post! "/deleteMessage" {:chat_id    chat-id
-                                             :message_id (:message_id reply)})))))
+                  :else               (:text message)))
+              (delete chat-id (:message_id message)
+                (str "Хе-хе, сработал антиспам! Напиши обычное сообщение, потом можешь постить ссылки/картинки, " mention)))
+            
+            ;; unknown user posting mix of cyrillic/latin
+            (mixed-lang? message)
+            (do
+              (println "[ BLOCKED ]" mention "-> @" (:username chat) ":" (:text message))
+              (delete chat-id (:message_id message)
+                (str "Ты бот штоле? Не надо мешать кириллицу и латиницу, " mention)))
+            
             ;; unknown user posting text
+            :else
             (when (:text message)
               (append-user user))))
           
