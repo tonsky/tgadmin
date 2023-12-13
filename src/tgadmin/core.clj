@@ -84,9 +84,10 @@
     (some #(#{"url" "mention"} (:type %)) (:entities message))))
 
 (defn mixed-lang? [message]
-  (or
-    (re-find #"\p{IsLatin}\p{IsCyrillic}+\p{IsLatin}+\p{IsCyrillic}" (:text message))
-    (re-find #"\p{IsCyrillic}\p{IsLatin}+\p{IsCyrillic}+\p{IsLatin}" (:text message))))
+  (when-some [text (:text message)]
+    (or
+      (re-find #"\p{IsLatin}\p{IsCyrillic}+\p{IsLatin}+\p{IsCyrillic}" text)
+      (re-find #"\p{IsCyrillic}\p{IsLatin}+\p{IsCyrillic}+\p{IsLatin}" text))))
 
 (comment
   (mixed-lang? {:text "Мы ищeм пapтнepoв для тopгoвлu в направленuu арбuтража kрuптовалют. Дaжe бeз oпытa! Гoтoвы yзнaть пoдpoбнoстu? Ждy вac в лuчныx сoобщенuях для обсужденuя."})
