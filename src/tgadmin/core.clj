@@ -78,21 +78,47 @@
       (.write w (str " " last_name)))
     (.write w "\n")))
 
-(defn media? [message]
-  (or
-    (some #(contains? message %) [:photo :document :video])
-    (some #(#{"url" "mention"} (:type %)) (:entities message))))
+(defn quote-strings [ss]
+  (if (> (count ss) 5)
+    (str "'" (str/join "', '" (take 5 ss)) "', ...")
+    (str "'" (str/join "', '" ss) "'")))
 
-(defn mixed-lang? [message]
+(defn media [message]
+  (some->>
+    (not-empty
+      (concat
+        (when (:photo message)
+          ["картинку"])
+        (if (or (:video message) (:animation message))
+          ["видео"]
+          (when (:document message)
+            ["документ"]))
+        (when (some #(= "url" (:type %)) (:entities message))
+          ["ссылку"])
+        (when (some #(= "mention" (:type %)) (:entities message))
+          ["меншн"])))
+    (str/join ", ")))
+
+(defn mixed-lang [message]
   (when-some [text (:text message)]
-    (or
-      (re-find #"\p{IsLatin}\p{IsCyrillic}+\p{IsLatin}+\p{IsCyrillic}" text)
-      (re-find #"\p{IsCyrillic}\p{IsLatin}+\p{IsCyrillic}+\p{IsLatin}" text))))
+    (some->>
+      (not-empty
+        (re-seq #"(?uUi)\b\w*(?:\p{IsLatin}\p{IsCyrillic}+\p{IsLatin}+\p{IsCyrillic}|\p{IsCyrillic}\p{IsLatin}+\p{IsCyrillic}+\p{IsLatin})\w*\b" text))
+      distinct
+      quote-strings)))
 
-(comment
-  (mixed-lang? {:text "Мы ищeм пapтнepoв для тopгoвлu в направленuu арбuтража kрuптовалют. Дaжe бeз oпытa! Гoтoвы yзнaть пoдpoбнoстu? Ждy вac в лuчныx сoобщенuях для обсужденuя."})
-  
-  (mixed-lang {:text "C++ привет С++ привет"}))
+(defn stop-words [message]
+  (when-some [s (:text message)]
+    (some->>
+      (not-empty
+        (concat
+          (re-seq #"(?uUi)\b(?:сотрудничеств|сфер|направлени|заработ|доход|доллар|средств|деньг|личк|русло|актив|работ|команд|обучени|юмор|улыб|мудак|говн)[а-я]*\b" s)
+          (re-seq #"(?uUi)\b(?:лс)\b" s)
+          (re-seq #"(?uUi)\b(?:[0-9\.]+ ?р(?:уб)?\.?)\b" s)
+          (re-seq #"(?uUi)\b(?:usdt|usd|https|http|binance|web|18|p2p|trading)\b" s)
+          (re-seq #"(?uUi)(?:\$|💸|❇️|🚀|❗️)" s)))
+      distinct
+      quote-strings)))
 
 (defn delete [chat-id message-id text]
   (when-some [resp (post! "/deleteMessage" {:chat_id    chat-id
@@ -104,6 +130,44 @@
         (post! "/deleteMessage" {:chat_id    chat-id
                                  :message_id (:message_id reply)})))))
 
+; (defn delete [chat-id message-id text]
+;   (println chat-id message-id text))
+
+(defn handle-message [message]
+  (let [user    (:from message)
+        user-id (:id user)
+        chat    (:chat message)
+        chat-id (:id chat)
+        mention (if (:username user)
+                  (str "@" (:username user))
+                  (str "[%username%](tg://user?id=" (:id user) ")"))]
+    (when (not (@*known-users user-id))
+      (or
+        ; unknown user posting links
+        (when-some [types (media message)]
+          (println "[ BLOCKED ]" mention "in" (:username chat) "for containing:" types)
+          (delete chat-id (:message_id message)
+            (str mention ", сработал антиспам! Это твое первое сообщение здесь, и оно сразу содержит: " types ". Не надо так. Перепиши без этого"))
+          true)
+            
+        ;; unknown user posting mix of cyrillic/latin
+        (when-some [text (mixed-lang message)]
+          (println "[ BLOCKED ]" mention "in" (:username chat) " for mixing cyrillic with latin:" text)
+          (delete chat-id (:message_id message)
+            (str "Как робот роботу скажу, " mention ", зря ты мешаешь кириллицу и латиницу: " text))
+          true)
+            
+        ;; unknown user posting stop words
+        (when-some [stop-words (stop-words message)]
+          (println "[ BLOCKED ]" mention "in" (:username chat) "for stop-words:" stop-words)
+          (delete chat-id (:message_id message)
+            (str "Дружище " mention ", это твое первое сообщение и сразу стоп-слова: " stop-words ". Будь другом, перепиши без них?"))
+          true)
+            
+        ;; unknown user posting text
+        (when (:text message)
+          (append-user user))))))
+
 (defn -main [& args]
   (println "[ STARTED ]")
   (loop [offset 0]
@@ -112,39 +176,8 @@
         (doseq [update updates
                 :let [_       (prn update)
                       message (:message update)]
-                :when message
-                :let [user    (:from message)
-                      user-id (:id user)
-                      chat    (:chat message)
-                      chat-id (:id chat)
-                      mention (if (:username user)
-                                (str "@" (:username user))
-                                (str "[%username%](tg://user?id=" (:id user) ")"))]
-                :when (not (@*known-users user-id))]
-          (cond
-            ;; unknown user posting links
-            (media? message)
-            (do
-              (println "[ BLOCKED ]" mention "-> @" (:username chat) ":"
-                (cond
-                  (:photo message)    (str "[photo] " (:caption message))
-                  (:video message)    (str "[video] " (:caption message))
-                  (:document message) (str "[document] " (:caption message))
-                  :else               (:text message)))
-              (delete chat-id (:message_id message)
-                (str "Хе-хе, сработал антиспам! Напиши обычное сообщение, потом можешь постить ссылки/картинки, " mention)))
-            
-            ;; unknown user posting mix of cyrillic/latin
-            (mixed-lang? message)
-            (do
-              (println "[ BLOCKED ]" mention "-> @" (:username chat) ":" (:text message))
-              (delete chat-id (:message_id message)
-                (str "Ты бот штоле? Не надо мешать кириллицу и латиницу, " mention)))
-            
-            ;; unknown user posting text
-            :else
-            (when (:text message)
-              (append-user user))))
+                :when message]
+          (handle-message message))
           
         (if (empty? updates)
           (recur offset)
