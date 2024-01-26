@@ -9,6 +9,8 @@
     [java.io File FileWriter]
     [java.util Timer TimerTask]))
 
+;; utils
+
 (defonce ^Timer timer
   (Timer. true))
 
@@ -30,28 +32,44 @@
      (fn []
        ~@body)))
 
+(defn swap-dissoc! [*atom key]
+  (let [[before after] (swap-vals! *atom dissoc key)]
+    (get before key)))
+
+(defn quote-strings [ss]
+  (str "'" (str/join "', '" (distinct ss)) "'"))
+
+(defn trim [s]
+  (if (<= (count s) 80)
+    s
+    (str (subs s 0 80) "...")))
+
+;; config
+
 (def config
   (edn/read-string (slurp "config.edn")))
 
 (def token
   (:token config))
 
-(def *known-users
-  (atom
-    (->> (slurp "known_users")
-      (re-seq #"(?m)^-?\d+")
-      (map parse-long)
-      set)))
+(def react-period-ms
+  (:react-period-ms config 60000))
+
+;; Telegram API
 
 (defn post!
   ([method]
    (post! method {}))
   ([method opts]
    (try
-     (let [req {:url     (str "https://api.telegram.org/bot" token method)
-                :method  :post
-                :body    (json/generate-string opts)
-                :headers {"Content-Type" "application/json"}}
+     (let [opts (cond-> opts
+                  ; https://core.telegram.org/bots/api#markdownv2-style
+                  (= "MarkdownV2" (:parse_mode opts))
+                  (update :text str/replace #"[_*\[\]\(\)~`>#\+\-=|\{\}\.!]" #(str "\\" %)))
+           req  {:url     (str "https://api.telegram.org/bot" token method)
+                 :method  :post
+                 :body    (json/generate-string opts)
+                 :headers {"Content-Type" "application/json"}}
            resp @(http/request req)
            body (json/parse-string (:body resp) true)]
        (if (:ok body)
@@ -65,9 +83,102 @@
        (.printStackTrace e)
        nil))))
 
-(defn append-user [{:keys [id username first_name last_name]}]
+;; state
+
+;; #{user-id ...}
+(def *known-users
+  (atom
+    (->> (slurp "known_users")
+      (re-seq #"(?m)^-?\d+")
+      (map parse-long)
+      set)))
+
+;; {user-id [message ...]}
+(def *pending-messages
+  (atom {}))
+
+;; {user-id warning}
+(def *pending-warnings
+  (atom {}))
+
+;; app
+
+(defn check-media [message]
+  (when-some [types (not-empty
+                      (concat
+                        (when (:photo message)
+                          ["photo"])
+                        (cond
+                          (:video message)     ["video"]
+                          (:animation message) ["animation"]
+                          (:document message)  ["document"])
+                        (when (some #(= "url" (:type %)) (:entities message))
+                          ["url"])
+                        (when (some #(= "mention" (:type %)) (:entities message))
+                          ["mention"])))]
+    (str "containing: " (str/join ", " types))))
+
+(defn check-mixed-lang [message]
+  (when-some [text (:text message)]
+    (when-some [words (not-empty
+                        (re-seq #"(?uUi)\b\w*(?:\p{IsLatin}\p{IsCyrillic}+\p{IsLatin}+\p{IsCyrillic}|\p{IsCyrillic}\p{IsLatin}+\p{IsCyrillic}+\p{IsLatin})\w*\b" text))]
+      (str "mixing cyrillic with latin: " (quote-strings words)))))
+
+(defn check-stop-words [message]
+  (when-some [s (:text message)]
+    (when-some [words (not-empty
+                        (concat
+                          (re-seq #"(?uUi)\b(?:сотрудничеств|сфер|направлени|заработ|доход|доллар|средств|деньг|личк|русло|актив|работ|команд|обучени|юмор|улыб|мудак|говн)[а-я]*\b" s)
+                          (re-seq #"(?uUi)\b(?:лс)\b" s)
+                          (re-seq #"(?uUi)\b(?:[0-9\.]+ ?р(?:уб)?\.?)\b" s)
+                          (re-seq #"(?uUi)\b(?:usdt|usd|https|http|binance|bitcoin|web|18|p2p|trading)\b" s)
+                          (re-seq #"(?uUi)(?:\$|💸|❇️|🚀|❗️)" s)))]
+      (str "stop-words: " (quote-strings words)))))
+
+(defn check-message [message]
+  ((some-fn check-media check-mixed-lang check-stop-words)
+   message))
+
+(defn message-str [message]
+  (str
+    (:username (:chat message)) "/" (:message_id message)
+    " by " (:id (:from message))
+    (when-some [username (:username (:from message))]
+      (str " (" username ")"))))
+
+(defn warn [message reason]
+  (let [chat-id    (:id (:chat message))
+        message-id (:message_id message)
+        _          (println "[ WARNING ]" (message-str message) "for" reason)
+        user       (:from message)
+        user-id    (:id user)]
+    (if (contains? @*pending-warnings user-id)
+      (swap! *pending-messages update user-id conj message)
+      (let [mention    (if (:username user)
+                         (str "@" (:username user))
+                         (str "[%username%](tg://user?id=" (:id user) ")"))
+            warning    (post! "/sendMessage"
+                         {:chat_id           chat-id
+                          :reply_parameters  {:message_id message-id}
+                          :message_thread_id (:message_thread_id message)
+                          :parse_mode        "MarkdownV2"
+                          :text              (str "Привет " mention ", это антиспам. Напиши сообщение со словом «небот» и я отстану. Извини за неудобства")})
+            warning-id (:message_id warning)]
+        (swap! *pending-messages assoc user-id [message])
+        (swap! *pending-warnings assoc user-id warning)
+        (schedule react-period-ms
+          (when (swap-dissoc! *pending-warnings user-id)
+            (post! "/deleteMessage" {:chat_id chat-id, :message_id warning-id})
+            (let [[first-message & rest-messages] (swap-dissoc! *pending-messages user-id)]
+              (println "[ DELETING ]" (message-str first-message) "for" reason)
+              (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id first-message)})
+              (doseq [message rest-messages]
+                (println "[ DELETING ]" (message-str message))
+                (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id message)})))))))))
+
+(defn whitelist-user [{:keys [id username first_name last_name]}]
   (swap! *known-users conj id)
-  (println "[ USER ]" id username first_name last_name)
+  (println "[ WHITELIST ]" id username first_name last_name)
   (with-open [w (FileWriter. (io/file "known_users") true)]
     (.write w (str id))
     (when username
@@ -78,95 +189,41 @@
       (.write w (str " " last_name)))
     (.write w "\n")))
 
-(defn quote-strings [ss]
-  (if (> (count ss) 5)
-    (str "'" (str/join "', '" (take 5 ss)) "', ...")
-    (str "'" (str/join "', '" ss) "'")))
-
-(defn media [message]
-  (some->>
-    (not-empty
-      (concat
-        (when (:photo message)
-          ["картинку"])
-        (if (or (:video message) (:animation message))
-          ["видео"]
-          (when (:document message)
-            ["документ"]))
-        (when (some #(= "url" (:type %)) (:entities message))
-          ["ссылку"])
-        (when (some #(= "mention" (:type %)) (:entities message))
-          ["меншн"])))
-    (str/join ", ")))
-
-(defn mixed-lang [message]
-  (when-some [text (:text message)]
-    (some->>
-      (not-empty
-        (re-seq #"(?uUi)\b\w*(?:\p{IsLatin}\p{IsCyrillic}+\p{IsLatin}+\p{IsCyrillic}|\p{IsCyrillic}\p{IsLatin}+\p{IsCyrillic}+\p{IsLatin})\w*\b" text))
-      distinct
-      quote-strings)))
-
-(defn stop-words [message]
-  (when-some [s (:text message)]
-    (some->>
-      (not-empty
-        (concat
-          (re-seq #"(?uUi)\b(?:сотрудничеств|сфер|направлени|заработ|доход|доллар|средств|деньг|личк|русло|актив|работ|команд|обучени|юмор|улыб|мудак|говн)[а-я]*\b" s)
-          (re-seq #"(?uUi)\b(?:лс)\b" s)
-          (re-seq #"(?uUi)\b(?:[0-9\.]+ ?р(?:уб)?\.?)\b" s)
-          (re-seq #"(?uUi)\b(?:usdt|usd|https|http|binance|web|18|p2p|trading)\b" s)
-          (re-seq #"(?uUi)(?:\$|💸|❇️|🚀|❗️)" s)))
-      distinct
-      quote-strings)))
-
-(defn delete [chat-id message-id text]
-  (when-some [resp (post! "/deleteMessage" {:chat_id    chat-id
-                                            :message_id message-id})]
-    (let [reply (post! "/sendMessage" {:chat_id    chat-id
-                                       :parse_mode "MarkdownV2"
-                                       :text       text})]
-      (schedule 60000
-        (post! "/deleteMessage" {:chat_id    chat-id
-                                 :message_id (:message_id reply)})))))
-
-; (defn delete [chat-id message-id text]
-;   (println chat-id message-id text))
+(defn ack [message]
+  (let [user-id (:id (:from message))
+        chat-id (:id (:chat message))
+        warning (swap-dissoc! *pending-warnings user-id)
+        _       (swap! *pending-messages dissoc user-id)]
+    (whitelist-user (:from message))
+    (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id warning)})
+    (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id message)})))
 
 (defn handle-message [message]
-  (let [user    (:from message)
-        user-id (:id user)
-        chat    (:chat message)
-        chat-id (:id chat)
-        mention (if (:username user)
-                  (str "@" (:username user))
-                  (str "[%username%](tg://user?id=" (:id user) ")"))]
-    (when (not (@*known-users user-id))
-      (or
-        ; unknown user posting links
-        (when-some [types (media message)]
-          (println "[ BLOCKED ]" mention "in" (:username chat) "for containing:" types)
-          (delete chat-id (:message_id message)
-            (str mention ", сработал антиспам! Это твое первое сообщение здесь, и оно сразу содержит: " types ". Не надо так. Перепиши без этого"))
-          true)
-            
-        ;; unknown user posting mix of cyrillic/latin
-        (when-some [text (mixed-lang message)]
-          (println "[ BLOCKED ]" mention "in" (:username chat) " for mixing cyrillic with latin:" text)
-          (delete chat-id (:message_id message)
-            (str "Как робот роботу скажу, " mention ", зря ты мешаешь кириллицу и латиницу: " text))
-          true)
-            
-        ;; unknown user posting stop words
-        (when-some [stop-words (stop-words message)]
-          (println "[ BLOCKED ]" mention "in" (:username chat) "for stop-words:" stop-words)
-          (delete chat-id (:message_id message)
-            (str "Дружище " mention ", это твое первое сообщение и сразу стоп-слова: " stop-words ". Будь другом, перепиши без них?"))
-          true)
-            
-        ;; unknown user posting text
+  (let [user     (:from message)
+        user-id  (:id user)
+        known?   (@*known-users user-id)
+        ; known?   (and known? (not= "nikitonsky" (:username user)))
+        pending? (contains? @*pending-warnings user-id)]
+    (cond
+      pending?
+      (if (some->> (:text message)
+            (re-find #"(?uUi)\bне\s?(?:ро)?бот\b"))
+        (ack message)
+        (swap! *pending-messages update user-id conj message))
+      
+      (not known?)
+      (if-some [reason (check-message message)]
+        (warn message reason)
         (when (:text message)
-          (append-user user))))))
+          (whitelist-user user))))))
+
+(defn log-update [u]
+  (cond-> u
+    (-> u :message :reply_to_message :text)
+    (update :message update :reply_to_message update :text trim)
+    
+    true
+    prn))
 
 (defn -main [& args]
   (println "[ STARTED ]")
@@ -174,10 +231,13 @@
     (if-some [updates (post! "/getUpdates" {:offset offset})]
       (do
         (doseq [update updates
-                :let [_       (prn update)
+                :let [_       (log-update update)
                       message (:message update)]
                 :when message]
-          (handle-message message))
+          (try
+            (handle-message message)
+            (catch Exception e
+              (.printStackTrace e))))
           
         (if (empty? updates)
           (recur offset)
