@@ -160,7 +160,7 @@
             warning    (post! "/sendMessage"
                          {:chat_id           chat-id
                           :reply_parameters  {:message_id message-id}
-                          :message_thread_id (:message_thread_id message)
+                          ; :message_thread_id (:message_thread_id message)
                           :parse_mode        "MarkdownV2"
                           :text              (str "Привет " mention ", это антиспам. Напиши сообщение со словом «небот» и я отстану. Извини за неудобства")})
             warning-id (:message_id warning)]
@@ -246,6 +246,14 @@
 
 (comment
   (-main)
+  
+  (post! "/sendMessage"
+    {:chat_id           -1001436433940
+     :reply_parameters  {:message_id 95692}
+     ; :message_thread_id 95594
+     :parse_mode        "MarkdownV2"
+     :text              "test"})
+    
   
   (post! "/getMe")
   (post! "/getUpdates" {:offset 558841683})
