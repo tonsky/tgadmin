@@ -162,7 +162,7 @@
                           :reply_parameters  {:message_id message-id}
                           ; :message_thread_id (:message_thread_id message)
                           :parse_mode        "MarkdownV2"
-                          :text              (str "Привет " mention ", это антиспам. Напиши сообщение со словом «небот» и я отстану. Извини за неудобства")})
+                          :text              (str "Привет " mention ", это антиспам. Напиши сообщение со словом «небот» и я отстану. Ну а если бот, хана тебе")})
             warning-id (:message_id warning)]
         (swap! *pending-messages assoc user-id [message])
         (swap! *pending-warnings assoc user-id warning)
