@@ -65,7 +65,7 @@
      (let [opts (cond-> opts
                   ; https://core.telegram.org/bots/api#markdownv2-style
                   (= "MarkdownV2" (:parse_mode opts))
-                  (update :text str/replace #"[_*\[\]\(\)~`>#\+\-=|\{\}\.!]" #(str "\\" %)))
+                  (update :text str/replace #"[_*~`>#\+\-|\{\}\.!]" #(str "\\" %)))
            req  {:url     (str "https://api.telegram.org/bot" token method)
                  :method  :post
                  :body    (json/generate-string opts)
@@ -156,7 +156,7 @@
       (swap! *pending-messages update user-id conj message)
       (let [mention    (if (:username user)
                          (str "@" (:username user))
-                         (str "[%username%](tg://user?id=" (:id user) ")"))
+                         (str "[" (or (:first_name user) (:last_name user) "%username%") "](tg://user?id=" (:id user) ")"))
             warning    (post! "/sendMessage"
                          {:chat_id           chat-id
                           :reply_parameters  {:message_id message-id}
