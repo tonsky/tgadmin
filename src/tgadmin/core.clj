@@ -44,6 +44,14 @@
     s
     (str (subs s 0 80) "...")))
 
+(defmacro cond+ [& clauses]
+  (when-some [[test expr & rest] clauses]
+    (case test
+      :do    `(do ~expr (cond+ ~@rest))
+      :let   `(let ~expr (cond+ ~@rest))
+      :some  `(if-some ~expr ~(first rest) (cond+ ~@(next rest)))
+      #_else `(if ~test ~expr (cond+ ~@rest)))))
+
 ;; config
 
 (def config
@@ -93,15 +101,25 @@
       (map parse-long)
       set)))
 
-;; {user-id [message ...]}
-(def *pending-messages
-  (atom {}))
-
-;; {user-id warning}
+;; {user-id {:message message
+;;           :warning warning}}
 (def *pending-warnings
   (atom {}))
 
 ;; app
+
+(defn check-external [message]
+  (try
+    (let [resp @(http/request
+                  {:url             (str "https://lols.bot/?a=" (:id (:from message)))
+                   :method          :get
+                   :connect-timeout 5000})]
+      (when (= 200 (:status resp))
+        (let [body (json/parse-string (:body resp) true)]
+          (when (:banned body)
+            (str "banned at lols.bot")))))
+    (catch Exception e
+      (.printStackTrace e))))
 
 (defn check-media [message]
   (when-some [types (not-empty
@@ -128,7 +146,7 @@
   (when-some [s (:text message)]
     (when-some [words (not-empty
                         (concat
-                          (re-seq #"(?uUi)\b(?:сотрудничеств|сфер|направлени|заработ|доход|доллар|средств|деньг|личк|русло|актив|работ|команд|обучени|юмор|улыб|мудак|говн|курс)[а-я]*\b" s)
+                          (re-seq #"(?uUi)\b(?:сотрудничеств|сфер|выплат|направлени|заработ|доход|доллар|средств|деньг|личк|русло|актив|работ|команд|обучени|юмор|улыб|мудак|говн|курс)[а-я]*\b" s)
                           (re-seq #"(?uUi)\b(?:лс)\b" s)
                           (re-seq #"(?uUi)\b[а-я]*(?:менеджмент)[а-я]*\b" s)
                           (re-seq #"(?uUi)\b(?:[0-9\.]+ ?р(?:уб)?\.?)\b" s)
@@ -147,76 +165,99 @@
     (when-some [username (:username (:from message))]
       (str " (" username ")"))))
 
+(defn user-str ^String [user]
+  (let [{:keys [id username first_name last_name]} user]
+    (str id
+      (when username (str " @" username))
+      (when first_name (str " " first_name))
+      (when last_name (str " " last_name)))))
+
+(defn whitelist-user [user]
+  (swap! *known-users conj (:id user))
+  (println "[ WHITELIST ]" (user-str user))
+  (with-open [w (FileWriter. (io/file "known_users") true)]
+    (.write w (user-str user))
+    (.write w "\n")))
+
+(defn ban-user [user reason message & messages]
+  (let [chat-id (:id (:chat message))
+        user    (:from message)
+        user-id (:id user)]
+    (doseq [message (cons message messages)]
+      (println "[ DELETING ]" (message-str message) "for" reason)
+      (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id message)}))
+    (println "[ BAN ]" (user-str user) "for" reason)
+    (post! "/banChatMember" {:chat_id chat-id, :user_id user-id})))
+
 (defn warn [message reason]
   (let [chat-id    (:id (:chat message))
         message-id (:message_id message)
         _          (println "[ WARNING ]" (message-str message) "for" reason)
         user       (:from message)
         user-id    (:id user)]
-    (if (contains? @*pending-warnings user-id)
-      (swap! *pending-messages update user-id conj message)
-      (let [mention    (if (:username user)
-                         (str "@" (:username user))
-                         (str "[" (or (:first_name user) (:last_name user) "%username%") "](tg://user?id=" (:id user) ")"))
-            warning    (post! "/sendMessage"
-                         {:chat_id           chat-id
-                          :reply_parameters  {:message_id message-id}
-                          ; :message_thread_id (:message_thread_id message)
-                          :parse_mode        "MarkdownV2"
-                          :text              (str "Привет " mention ", это антиспам. Напиши сообщение со словом «небот» и я отстану. Ну а если бот, хана тебе")})
-            warning-id (:message_id warning)]
-        (swap! *pending-messages assoc user-id [message])
-        (swap! *pending-warnings assoc user-id warning)
-        (schedule react-period-ms
-          (when (swap-dissoc! *pending-warnings user-id)
-            (post! "/deleteMessage" {:chat_id chat-id, :message_id warning-id})
-            (let [[first-message & rest-messages] (swap-dissoc! *pending-messages user-id)]
-              (println "[ DELETING ]" (message-str first-message) "for" reason)
-              (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id first-message)})
-              (doseq [message rest-messages]
-                (println "[ DELETING ]" (message-str message))
-                (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id message)})))))))))
+    (let [mention    (if (:username user)
+                       (str "@" (:username user))
+                       (str "[" (or (:first_name user) (:last_name user) "%username%") "](tg://user?id=" (:id user) ")"))
+          warning    (post! "/sendMessage"
+                       {:chat_id           chat-id
+                        :reply_parameters  {:message_id message-id}
+                        ; :message_thread_id (:message_thread_id message)
+                        :parse_mode        "MarkdownV2"
+                        :text              (str "Привет " mention ", это антиспам. Напиши сообщение со словом «небот» и я отстану. Ну а если бот, хана тебе")})
+          warning-id (:message_id warning)]
+      (swap! *pending-warnings assoc user-id {:message message
+                                              :warning warning})
+      (schedule react-period-ms
+        (when (swap-dissoc! *pending-warnings user-id)
+          (ban-user user reason message warning))))))
 
-(defn whitelist-user [{:keys [id username first_name last_name]}]
-  (swap! *known-users conj id)
-  (println "[ WHITELIST ]" id username first_name last_name)
-  (with-open [w (FileWriter. (io/file "known_users") true)]
-    (.write w (str id))
-    (when username
-      (.write w (str " @" username)))
-    (when first_name
-      (.write w (str " " first_name)))
-    (when last_name
-      (.write w (str " " last_name)))
-    (.write w "\n")))
-
-(defn ack [message]
-  (let [user-id (:id (:from message))
-        chat-id (:id (:chat message))
-        warning (swap-dissoc! *pending-warnings user-id)
-        _       (swap! *pending-messages dissoc user-id)]
-    (whitelist-user (:from message))
+(defn ack [ack-message]
+  (let [user-id            (:id (:from ack-message))
+        chat-id            (:id (:chat ack-message))
+        {warning :warning} (swap-dissoc! *pending-warnings user-id)]
+    (whitelist-user (:from ack-message))
     (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id warning)})
-    (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id message)})))
+    (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id ack-message)})))
+
+(defn deny [message]
+  (let [user    (:from message)
+        user-id (:id user)]
+    (when-some [{first-message :message
+                 warning       :warning} (swap-dissoc! *pending-warnings user-id)]
+      (ban-user user "repeated message" first-message warning message))))
 
 (defn handle-message [message]
-  (let [user     (:from message)
-        user-id  (:id user)
-        known?   (@*known-users user-id)
-        ; known?   (and known? (not= "nikitonsky" (:username user)))
-        pending? (contains? @*pending-warnings user-id)]
-    (cond
-      pending?
-      (if (some->> (:text message)
-            (re-find #"(?uUi)\bне\s?(?:ро)?бот\b"))
-        (ack message)
-        (swap! *pending-messages update user-id conj message))
+  (let [user    (:from message)
+        user-id (:id user)
+        chat-id (:id (:chat message))]
+    (cond+
+      ;; known
+      (and
+        (@*known-users user-id)
+        #_(not= "nikitonsky" (:username user)))
+      :nop
+
+      ;; pending -- ack
+      (and
+        (contains? @*pending-warnings user-id)
+        (some->> (:text message) (re-find #"(?uUi)\bне\s?(?:ро)?бот\b")))
+      (ack message)
       
-      (not known?)
-      (if-some [reason (check-message message)]
-        (warn message reason)
-        (when (:text message)
-          (whitelist-user user))))))
+      ;; pending -- repeated message
+      (contains? @*pending-warnings user-id)
+      (deny message)
+      
+      ;; unknown -- banned by lols
+      :some [reason (check-external message)]
+      (ban-user user reason message)
+      
+      ;; unknown -- sus
+      :some [reason (check-message message)]
+      (warn message reason)
+      
+      ;; unknown -- okay
+      (:text message)
+      (whitelist-user user))))
 
 (defn log-update [u]
   (cond-> u
@@ -247,6 +288,15 @@
 
 (comment
   (-main)
+  
+  (json/parse-string
+    (:body @(http/get "https://lols.bot/?a=232806939")) true)
+  
+  (json/parse-string
+    (:body @(http/get "https://lols.bot/?a=2069820207")) true)
+  
+  (:content-type (:headers @(http/get "https://lols.bot/?a=2069820207")))
+  (json/parse-string (:body @(http/get "https://lols.bot/asdas")) true)
   
   (post! "/sendMessage"
     {:chat_id           -1001436433940
