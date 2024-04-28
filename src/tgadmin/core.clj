@@ -240,7 +240,7 @@
       ;; pending -- ack
       (and
         (contains? @*pending-warnings user-id)
-        (some->> (:text message) (re-find #"(?uUi)\bне\s?(?:ро)?бот\b")))
+        (some->> (:text message) (re-find #"(?uUi)\bне\s?(?:ро)?бо[тм]\b")))
       (ack message)
       
       ;; pending -- repeated message
