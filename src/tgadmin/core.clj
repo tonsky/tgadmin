@@ -132,6 +132,8 @@
                           (:document message)  ["document"])
                         (when (some #(= "url" (:type %)) (:entities message))
                           ["url"])
+                        (when (some #(= "text_link" (:type %)) (:entities message))
+                          ["text_link"])
                         (when (some #(= "mention" (:type %)) (:entities message))
                           ["mention"])))]
     (str "containing: " (str/join ", " types))))
@@ -141,6 +143,11 @@
     (when-some [words (not-empty
                         (re-seq #"(?uUi)\b\w*(?:\p{IsLatin}\p{IsCyrillic}+\p{IsLatin}+\p{IsCyrillic}|\p{IsCyrillic}\p{IsLatin}+\p{IsCyrillic}+\p{IsLatin})\w*\b" text))]
       (str "mixing cyrillic with latin: " (quote-strings words)))))
+
+(defn check-symbols [message]
+  (when-some [text (:text message)]
+    (when (or (str/index-of text "⁨"))
+      (str "suspicious characters"))))
 
 (defn check-stop-words [message]
   (when-some [s (:text message)]
@@ -155,7 +162,7 @@
       (str "stop-words: " (quote-strings words)))))
 
 (defn check-message [message]
-  ((some-fn check-media check-mixed-lang check-stop-words)
+  ((some-fn check-media check-mixed-lang check-symbols check-stop-words)
    message))
 
 (defn message-str [message]
