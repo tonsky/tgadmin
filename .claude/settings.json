@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [],
+    "deny": [
+      "Agent",
+      "Bash",
+      "Edit",
+      "Glob",
+      "Grep",
+      "LS",
+      "MultiEdit",
+      "NotebookEdit",
+      "NotebookRead",
+      "Read",
+      "Task",
+      "TodoRead",
+      "TodoWrite",
+      "Write"
+    ]
+  }
+}

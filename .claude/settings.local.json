@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__clojure-mcp__glob_files",
+      "mcp__clojure-mcp__grep",
+      "mcp__clojure-mcp__read_file",
+      "mcp__clojure-mcp__bash",
+      "mcp__clojure-mcp__file_write",
+      "mcp__clojure-mcp__LS",
+      "mcp__clojure-mcp__clojure_eval",
+      "mcp__clojure-mcp__file_edit",
+      "mcp__clojure-mcp__clojure_edit"
+    ],
+    "deny": []
+  }
+}
