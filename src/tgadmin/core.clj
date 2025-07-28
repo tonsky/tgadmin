@@ -1,13 +1,14 @@
 (ns tgadmin.core
   (:require
-    [cheshire.core :as json]
-    [clojure.edn :as edn]
-    [clojure.java.io :as io]
-    [clojure.string :as str]
-    [org.httpkit.client :as http])
+   [cheshire.core :as json]
+   [clojure.edn :as edn]
+   [clojure.java.io :as io]
+   [clojure.string :as str]
+   [clojure+.core :as clojure+ :refer [if+ when+ cond+]]
+   [org.httpkit.client :as http])
   (:import
-    [java.io File FileWriter]
-    [java.util Timer TimerTask]))
+   [java.io File FileWriter]
+   [java.util Timer TimerTask]))
 
 ;; utils
 
@@ -43,14 +44,6 @@
   (if (<= (count s) 80)
     s
     (str (subs s 0 80) "...")))
-
-(defmacro cond+ [& clauses]
-  (when-some [[test expr & rest] clauses]
-    (case test
-      :do    `(do ~expr (cond+ ~@rest))
-      :let   `(let ~expr (cond+ ~@rest))
-      :some  `(if-some ~expr ~(first rest) (cond+ ~@(next rest)))
-      #_else `(if ~test ~expr (cond+ ~@rest)))))
 
 ;; config
 
@@ -104,6 +97,19 @@
 ;; {user-id {:message message
 ;;           :warning warning}}
 (def *pending-warnings
+  (atom {}))
+
+;; Time to first clown monitoring
+(def reaction-channel-id
+  #_-1002729833355 ;; nikitonsky_pub_test
+  -1001339432494)  ;; nikitonsky_pub
+
+(def reaction-group-id
+  #_-1002762672757 ;; nikitonsky_chat_test
+  -1001436433940)  ;; nikitonsky_chat
+
+(def *reaction-channel-posts
+  "{message_id {:date timestamp}}"
   (atom {}))
 
 ;; app
@@ -255,16 +261,49 @@
       (deny message)
       
       ;; unknown -- banned by lols
-      :some [reason (check-external message)]
+      :let [reason (check-external message)]
+      reason
       (ban-user user reason message)
       
       ;; unknown -- sus
-      :some [reason (check-message message)]
+      :let [reason (check-message message)]
+      reason
       (warn message reason)
       
       ;; unknown -- okay
       (:text message)
       (whitelist-user user))))
+
+(defn handle-reaction-post [message]
+  (when (= reaction-channel-id (-> message :forward_from_chat :id))
+    (let [message-id (:forward_from_message_id message)
+          date       (:forward_date message)]
+      (swap! *reaction-channel-posts assoc message-id {:date date})
+      (println (str "[ TRACKING REACTIONS ] " (-> message :forward_from_chat :title) ", post #" message-id ": “" (trim (:text message)) "”")))))
+
+(defn handle-reaction-count [reaction-count]
+  (let [{message-id    :message_id
+         reactions     :reactions
+         reaction-date :date
+         {chat-id      :id
+          chat-title   :title} :chat} reaction-count]
+    (when+ (and
+             (= chat-id reaction-channel-id)
+             :let [[reaction & _] (filter #(= "🤡" (-> % :type :emoji)) reactions)]
+             reaction
+             :let [{post-date :date} (@*reaction-channel-posts message-id)]
+             post-date)
+      (let [minutes    (-> (- reaction-date post-date) (quot 60))
+            declension (cond
+                         (#{11 12 13 14} (mod minutes 100)) "минут"
+                         (= 1 (mod minutes 10)) "минута"
+                         (#{2 3 4} (mod minutes 10)) "минуты"
+                         :else "минут")]
+        (println (str "[ FIRST REACTION ] Channel " chat-title ", post #" message-id ", reaction " reaction ", delta t " minutes " minutes"))
+        (post! "/sendMessage"
+          {:chat_id reaction-group-id
+           :text    (str "Время до первого 🤡 — " minutes " " declension)})
+        (swap! *reaction-channel-posts dissoc message-id)))))
 
 (defn log-update [u]
   (cond-> u
@@ -277,14 +316,21 @@
 (defn -main [& args]
   (println "[ STARTED ]")
   (loop [offset 0]
-    (if-some [updates (post! "/getUpdates" {:offset offset})]
+    (if-some [updates (post! "/getUpdates"
+                        {:offset offset
+                         :allowed_updates ["message" "message_reaction_count"]})]
       (do
         (doseq [update updates
-                :let [_       (log-update update)
-                      message (:message update)]
-                :when message]
+                :let [_ (log-update update)]]
           (try
-            (handle-message message)
+            (cond
+              (:message update)
+              (do
+                (handle-reaction-post (:message update))
+                (handle-message (:message update)))
+
+              (:message_reaction_count update)
+              (handle-reaction-count (:message_reaction_count update)))
             (catch Exception e
               (.printStackTrace e))))
           
@@ -296,6 +342,68 @@
 (comment
   (-main)
   
+  ;; post in channel
+  {:update_id 558985903
+   :message
+   {:date                    1753738345
+
+    :forward_from_chat
+    {:id       -1002729833355
+     :title    "Channel Test"
+     :username "nikitonsky_pub_test"
+     :type     "channel"}
+
+    :chat
+    {:id       -1002762672757
+     :title    "Channel Test Chat"
+     :username "nikitonsky_chat_test"
+     :type     "supergroup"}
+
+    :is_automatic_forward    true
+    :message_id              15
+
+    :forward_origin
+    {:type             "channel"
+     :chat
+     {:id       -1002729833355
+      :title    "Channel Test"
+      :username "nikitonsky_pub_test"
+      :type     "channel"}
+     :message_id       7
+     :author_signature "Nikita Prokopov"
+     :date             1753738342}
+
+    :from
+    {:id         777000
+     :is_bot     false
+     :first_name "Telegram"}
+
+    :forward_signature       "Nikita Prokopov"
+    :forward_from_message_id 7
+    :forward_date            1753738342
+    :sender_chat
+    {:id       -1002729833355
+     :title    "Channel Test"
+     :username "nikitonsky_pub_test"
+     :type     "channel"}
+    :text                    "channel test post 5"}}
+
+  ;; reactions
+  {:update_id              558985904
+   :message_reaction_count
+   {:chat
+    {:id       -1002729833355
+     :title    "Channel Test"
+     :username "nikitonsky_pub_test"
+     :type     "channel"}
+    :message_id 7
+    :date       1753738503
+    :reactions
+    [{:type
+      {:type  "emoji"
+       :emoji "🤡"}
+      :total_count 1}]}}
+
   (json/parse-string
     (:body @(http/get "https://lols.bot/?a=232806939")) true)
   
