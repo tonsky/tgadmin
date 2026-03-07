@@ -59,4 +59,4 @@ The bot implements a sophisticated spam detection algorithm:
 
 - `http-kit` - HTTP client for Telegram API
 - `cheshire` - JSON parsing
-- Development tools: `clj-reload`, `nrepl`, `duti`
+- Development tools: `clj-reload`
