@@ -251,15 +251,20 @@
       :let [reason (check-external message)]
       reason
       (ban-user user reason [message])
-      
-      ;; unknown -- sus
-      :let [reason (check-message message)]
-      reason
-      (warn message reason)
-      
-      ;; unknown -- okay
+
+      ;; first message -- warn
       (:text message)
-      (whitelist-user user))))
+      (warn message "First message")
+
+      ; ;; unknown -- sus
+      ; :let [reason (check-message message)]
+      ; reason
+      ; (warn message reason)
+      ;
+      ; ;; unknown -- okay
+      ; (:text message)
+      ; (whitelist-user user)
+      )))
 
 (defn handle-reaction-post [message]
   (when (= reaction-channel-id (-> message :forward_from_chat :id))
