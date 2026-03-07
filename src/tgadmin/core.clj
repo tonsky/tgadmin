@@ -94,7 +94,7 @@
       (map parse-long)
       set)))
 
-;; {user-id {:message message
+;; {user-id {:messages [message ...]
 ;;           :warning warning}}
 (def *pending-warnings
   (atom {}))
@@ -193,15 +193,13 @@
     (.write w (user-str user))
     (.write w "\n")))
 
-(defn ban-user [user reason message & messages]
-  (let [chat-id (:id (:chat message))
-        user    (:from message)
-        user-id (:id user)]
-    (doseq [message (cons message messages)]
+(defn ban-user [user reason messages]
+  (let [chat-id (:id (:chat (first messages)))]
+    (doseq [message messages]
       (println "[ DELETING ]" (message-str message) "for" reason)
       (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id message)}))
     (println "[ BAN ]" (user-str user) "for" reason)
-    (post! "/banChatMember" {:chat_id chat-id, :user_id user-id})))
+    (post! "/banChatMember" {:chat_id chat-id, :user_id (:id user)})))
 
 (defn warn [message reason]
   (let [chat-id    (:id (:chat message))
@@ -218,11 +216,11 @@
                       :parse_mode       "MarkdownV2"
                       :text             (str "Привет " mention ", это антиспам. Нажми кнопку, что ты не робот ↓👇")
                       :reply_markup     {:inline_keyboard [[{:text "Я не робот" :callback_data (str "ack:" user-id)}]]}})]
-    (swap! *pending-warnings assoc user-id {:message message
-                                            :warning warning})
+    (swap! *pending-warnings assoc user-id {:messages [message]
+                                            :warning  warning})
     (schedule react-period-ms
-      (when (swap-dissoc! *pending-warnings user-id)
-        (ban-user user reason message warning)))))
+      (when-some [{:keys [messages warning]} (swap-dissoc! *pending-warnings user-id)]
+        (ban-user user reason (concat messages [warning]))))))
 
 (defn handle-callback-query [callback-query]
   (let [user-id  (:id (:from callback-query))
@@ -233,13 +231,6 @@
       (when-some [{warning :warning} (swap-dissoc! *pending-warnings user-id)]
         (whitelist-user (:from callback-query))
         (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id warning)})))))
-
-(defn deny [message]
-  (let [user    (:from message)
-        user-id (:id user)]
-    (when-some [{first-message :message
-                 warning       :warning} (swap-dissoc! *pending-warnings user-id)]
-      (ban-user user "repeated message" first-message warning message))))
 
 (defn handle-message [message]
   (let [user    (:from message)
@@ -252,14 +243,14 @@
         #_(not= "nikitonsky" (:username user)))
       :nop
 
-      ;; pending -- repeated message
+      ;; pending -- collect messages
       (contains? @*pending-warnings user-id)
-      (deny message)
-      
+      (swap! *pending-warnings update-in [user-id :messages] conj message)
+
       ;; unknown -- banned by lols
       :let [reason (check-external message)]
       reason
-      (ban-user user reason message)
+      (ban-user user reason [message])
       
       ;; unknown -- sus
       :let [reason (check-message message)]
