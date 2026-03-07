@@ -208,30 +208,31 @@
         message-id (:message_id message)
         _          (println "[ WARNING ]" (message-str message) "for" reason)
         user       (:from message)
-        user-id    (:id user)]
-    (let [mention    (if (:username user)
-                       (str "@" (:username user))
-                       (str "[" (or (:first_name user) (:last_name user) "%username%") "](tg://user?id=" (:id user) ")"))
-          warning    (post! "/sendMessage"
-                       {:chat_id           chat-id
-                        :reply_parameters  {:message_id message-id}
-                        ; :message_thread_id (:message_thread_id message)
-                        :parse_mode        "MarkdownV2"
-                        :text              (str "Привет " mention ", это антиспам. Напиши сообщение со словом «небот» и я отстану. Ну а если бот, хана тебе")})
-          warning-id (:message_id warning)]
-      (swap! *pending-warnings assoc user-id {:message message
-                                              :warning warning})
-      (schedule react-period-ms
-        (when (swap-dissoc! *pending-warnings user-id)
-          (ban-user user reason message warning))))))
+        user-id    (:id user)
+        mention    (if (:username user)
+                     (str "@" (:username user))
+                     (str "[" (or (:first_name user) (:last_name user) "%username%") "](tg://user?id=" (:id user) ")"))
+        warning    (post! "/sendMessage"
+                     {:chat_id          chat-id
+                      :reply_parameters {:message_id message-id}
+                      :parse_mode       "MarkdownV2"
+                      :text             (str "Привет " mention ", это антиспам. Нажми кнопку, что ты не робот ↓👇")
+                      :reply_markup     {:inline_keyboard [[{:text "Я не робот" :callback_data (str "ack:" user-id)}]]}})]
+    (swap! *pending-warnings assoc user-id {:message message
+                                            :warning warning})
+    (schedule react-period-ms
+      (when (swap-dissoc! *pending-warnings user-id)
+        (ban-user user reason message warning)))))
 
-(defn ack [ack-message]
-  (let [user-id            (:id (:from ack-message))
-        chat-id            (:id (:chat ack-message))
-        {warning :warning} (swap-dissoc! *pending-warnings user-id)]
-    (whitelist-user (:from ack-message))
-    (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id warning)})
-    (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id ack-message)})))
+(defn handle-callback-query [callback-query]
+  (let [user-id  (:id (:from callback-query))
+        chat-id  (-> callback-query :message :chat :id)
+        data     (:data callback-query)]
+    (post! "/answerCallbackQuery" {:callback_query_id (:id callback-query)})
+    (when (= data (str "ack:" user-id))
+      (when-some [{warning :warning} (swap-dissoc! *pending-warnings user-id)]
+        (whitelist-user (:from callback-query))
+        (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id warning)})))))
 
 (defn deny [message]
   (let [user    (:from message)
@@ -251,12 +252,6 @@
         #_(not= "nikitonsky" (:username user)))
       :nop
 
-      ;; pending -- ack
-      (and
-        (contains? @*pending-warnings user-id)
-        (some->> (:text message) (re-find #"(?uUi)\bне\s?(?:ро)?бо[тм]\b")))
-      (ack message)
-      
       ;; pending -- repeated message
       (contains? @*pending-warnings user-id)
       (deny message)
@@ -319,7 +314,7 @@
   (loop [offset 0]
     (if-some [updates (post! "/getUpdates"
                         {:offset offset
-                         :allowed_updates ["message" "message_reaction_count"]})]
+                         :allowed_updates ["message" "callback_query" "message_reaction_count"]})]
       (do
         (doseq [update updates
                 :let [_ (log-update update)]]
@@ -329,6 +324,9 @@
               (do
                 (handle-reaction-post (:message update))
                 (handle-message (:message update)))
+
+              (:callback_query update)
+              (handle-callback-query (:callback_query update))
 
               (:message_reaction_count update)
               (handle-reaction-count (:message_reaction_count update)))
