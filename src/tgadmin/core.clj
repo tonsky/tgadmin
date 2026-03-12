@@ -253,7 +253,7 @@
       (ban-user user reason [message])
 
       ;; first message -- warn
-      (:text message)
+      :else
       (warn message "First message")
 
       ; ;; unknown -- sus
