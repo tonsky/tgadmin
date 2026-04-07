@@ -14,3 +14,4 @@ pom.xml.asc
 .DS_Store
 config.edn
 known_users
+/data

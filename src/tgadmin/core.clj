@@ -37,9 +37,6 @@
   (let [[before after] (swap-vals! *atom dissoc key)]
     (get before key)))
 
-(defn quote-strings [ss]
-  (str "'" (str/join "', '" (distinct ss)) "'"))
-
 (defn trim [s]
   (if (<= (count s) 80)
     s
@@ -52,9 +49,6 @@
 
 (def token
   (:token config))
-
-(def react-period-ms
-  (:react-period-ms config 60000))
 
 ;; Telegram API
 
@@ -94,10 +88,19 @@
       (map parse-long)
       set)))
 
-;; {user-id {:messages [message ...]
-;;           :warning warning}}
-(def *pending-warnings
+;; {user-id {:messages     [message ...]
+;;           :vote-message message
+;;           :approve      #{voter-id ...}
+;;           :ban          #{voter-id ...}
+;;           :added        <unix time>}}
+(def *pending-votes
   (atom {}))
+
+(def vote-limit
+  3)
+
+(def vote-ttl
+  (* 24 60 60 1000))
 
 ;; Time to first clown monitoring
 (def reaction-channel-id
@@ -126,51 +129,6 @@
             (str "banned at lols.bot")))))
     (catch Exception e
       (.printStackTrace e))))
-
-(defn check-media [message]
-  (when-some [types (not-empty
-                      (concat
-                        (when (:photo message)
-                          ["photo"])
-                        (cond
-                          (:video message)     ["video"]
-                          (:animation message) ["animation"]
-                          (:document message)  ["document"])
-                        (when (some #(= "url" (:type %)) (:entities message))
-                          ["url"])
-                        (when (some #(= "text_link" (:type %)) (:entities message))
-                          ["text_link"])
-                        (when (some #(= "mention" (:type %)) (:entities message))
-                          ["mention"])))]
-    (str "containing: " (str/join ", " types))))
-
-(defn check-mixed-lang [message]
-  (when-some [text (:text message)]
-    (when-some [words (not-empty
-                        (re-seq #"(?uUi)\b\w*(?:\p{IsLatin}\p{IsCyrillic}+\p{IsLatin}+\p{IsCyrillic}|\p{IsCyrillic}\p{IsLatin}+\p{IsCyrillic}+\p{IsLatin})\w*\b" text))]
-      (str "mixing cyrillic with latin: " (quote-strings words)))))
-
-(defn check-symbols [message]
-  (when-some [text (:text message)]
-    (when (or (str/index-of text "⁨"))
-      (str "suspicious characters"))))
-
-(defn check-stop-words [message]
-  (when-some [s (:text message)]
-    (when-some [words (not-empty
-                        (concat
-                          (re-seq #"(?uUi)\b(?:сотрудничеств|сфер|выплат|направлени|заработ|доход|доллар|средств|деньг|личк|русло|актив|работ|команд|обучени|юмор|улыб|мудак|говн|курс|помощь|напиш|срочн)[а-я]*\b" s)
-                          (re-seq #"(?uUi)\b(?:лс)\b" s)
-                          (re-seq #"(?uUi)\b[а-я]*(?:менеджмент)[а-я]*\b" s)
-                          (re-seq #"(?uUi)\b(?:[0-9\.]+ ?р(?:уб)?\.?)\b" s)
-                          (re-seq #"(?uUi)\b(?:usdt|usd|https|http|binance|bitcoin|web|18|p2p|trading)\b" s)
-                          (re-seq #"[\p{IsHan}\p{IsHangul}]+" s)
-                          (re-seq #"(?uUi)(?:\$|💸|❇️|🚀|❗️)" s)))]
-      (str "stop-words: " (quote-strings words)))))
-
-(defn check-message [message]
-  ((some-fn check-media check-mixed-lang check-symbols check-stop-words)
-   message))
 
 (defn message-str [message]
   (str
@@ -201,36 +159,92 @@
     (println "[ BAN ]" (user-str user) "for" reason)
     (post! "/banChatMember" {:chat_id chat-id, :user_id (:id user)})))
 
-(defn warn [message reason]
+(defn vote-keyboard [user-id approve-count ban-count]
+  {:inline_keyboard [[{:text          (str "🤖 Бот (" ban-count ")")
+                       :callback_data (str "ban:" user-id)}
+                      {:text          (str "🧑 Не бот (" approve-count ")")
+                       :callback_data (str "approve:" user-id)}]]})
+
+(defn start-vote [message]
   (let [chat-id    (:id (:chat message))
         message-id (:message_id message)
-        _          (println "[ WARNING ]" (message-str message) "for" reason)
         user       (:from message)
         user-id    (:id user)
-        mention    (if (:username user)
-                     (str "@" (:username user))
-                     (str "[" (or (:first_name user) (:last_name user) "%username%") "](tg://user?id=" (:id user) ")"))
-        warning    (post! "/sendMessage"
+        _          (println "[ VOTE ]" (message-str message))
+        mention    (or
+                     (when (and (:first_name user) (:last_name user))
+                       (str (:first_name user) " " (:last_name user)))
+                     (:first_name user)
+                     (:last_name user)
+                     (:username user)
+                     user-id)
+        vote-msg   (post! "/sendMessage"
                      {:chat_id          chat-id
                       :reply_parameters {:message_id message-id}
                       :parse_mode       "MarkdownV2"
-                      :text             (str "Привет " mention ", это антиспам. Нажми кнопку, что ты не робот ↓👇")
-                      :reply_markup     {:inline_keyboard [[{:text "Я не робот" :callback_data (str "ack:" user-id)}]]}})]
-    (swap! *pending-warnings assoc user-id {:messages [message]
-                                            :warning  warning})
-    (schedule react-period-ms
-      (when-some [{:keys [messages warning]} (swap-dissoc! *pending-warnings user-id)]
-        (ban-user user reason (concat messages [warning]))))))
+                      :text             (str "Голосуем! " mention " — бот или нет?")
+                      :reply_markup     (vote-keyboard user-id 0 0)})]
+    (swap! *pending-votes assoc user-id
+      {:messages     [message]
+       :vote-message vote-msg
+       :approve      #{}
+       :ban          #{}
+       :added        (System/currentTimeMillis)})))
 
 (defn handle-callback-query [callback-query]
-  (let [user-id  (:id (:from callback-query))
-        chat-id  (-> callback-query :message :chat :id)
-        data     (:data callback-query)]
-    (post! "/answerCallbackQuery" {:callback_query_id (:id callback-query)})
-    (when (= data (str "ack:" user-id))
-      (when-some [{warning :warning} (swap-dissoc! *pending-warnings user-id)]
-        (whitelist-user (:from callback-query))
-        (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id warning)})))))
+  (let [callback-id           (:id callback-query)
+        voter-id              (:id (:from callback-query))
+        chat-id               (-> callback-query :message :chat :id)
+        msg-id                (-> callback-query :message :message_id)
+        data                  (:data callback-query)
+        [_ action target-id]  (re-matches #"(approve|ban):(.*)" data)
+        target-id             (some-> target-id parse-long)
+        pending               (@*pending-votes target-id)
+        {:keys [approve ban messages vote-message]} pending
+        target-user           (:from (first messages))]
+
+    (cond+
+      ;; not in progress
+      (not pending)
+      (post! "/answerCallbackQuery" {:callback_query_id callback-id})
+
+      ;; repeated vote
+      (or
+        (and (= "approve" action) (approve voter-id))
+        (and (= "ban" action)     (ban voter-id)))
+      (post! "/answerCallbackQuery"
+        {:callback_query_id callback-id
+         :text              "Вы уже проголосовали"})
+
+      :let [_        (post! "/answerCallbackQuery" {:callback_query_id callback-id})
+            vote     (fn [pending]
+                       (if (= "approve" action)
+                         (-> pending
+                           (update :approve conj voter-id)
+                           (update :ban disj voter-id))
+                         (-> pending
+                           (update :approve disj voter-id)
+                           (update :ban conj voter-id))))
+            pending' (-> (swap! *pending-votes update target-id vote)
+                       (get target-id))]
+
+      ;; approve
+      (>= (count (:approve pending')) vote-limit)
+      (when (swap-dissoc! *pending-votes target-id)
+        (post! "/deleteMessage" {:chat_id chat-id :message_id (:message_id vote-message)})
+        (whitelist-user target-user))
+
+      ;; ban
+      (>= (count (:ban pending')) vote-limit)
+      (when (swap-dissoc! *pending-votes target-id)
+        (post! "/deleteMessage" {:chat_id chat-id :message_id (:message_id vote-message)})
+        (ban-user target-user "user vote" messages))
+
+      ;; update counts
+      (post! "/editMessageReplyMarkup"
+        {:chat_id      chat-id
+         :message_id   msg-id
+         :reply_markup (vote-keyboard target-id (count (:approve pending')) (count (:ban pending')))}))))
 
 (defn handle-message [message]
   (let [user    (:from message)
@@ -244,27 +258,17 @@
       :nop
 
       ;; pending -- collect messages
-      (contains? @*pending-warnings user-id)
-      (swap! *pending-warnings update-in [user-id :messages] conj message)
+      (contains? @*pending-votes user-id)
+      (swap! *pending-votes update-in [user-id :messages] conj message)
 
       ;; unknown -- banned by lols
       :let [reason (check-external message)]
       reason
       (ban-user user reason [message])
 
-      ;; first message -- warn
+      ;; first message -- start community vote
       :else
-      (warn message "First message")
-
-      ; ;; unknown -- sus
-      ; :let [reason (check-message message)]
-      ; reason
-      ; (warn message reason)
-      ;
-      ; ;; unknown -- okay
-      ; (:text message)
-      ; (whitelist-user user)
-      )))
+      (start-vote message))))
 
 (defn handle-reaction-post [message]
   (when (= reaction-channel-id (-> message :forward_from_chat :id))
@@ -305,8 +309,16 @@
     true
     prn))
 
+(defn cleanup-pending-votes []
+  (let [now (System/currentTimeMillis)]
+    (doseq [[user-id {:keys [added]}] @*pending-votes]
+      (when (< added (- now vote-ttl))
+        (println "[ CLEANUP ]" user-id)
+        (swap! *pending-votes dissoc user-id)))))
+
 (defn -main [& args]
   (println "[ STARTED ]")
+  (.scheduleAtFixedRate timer (timer-task cleanup-pending-votes) 0 (* 60 60 1000))
   (loop [offset 0]
     (if-some [updates (post! "/getUpdates"
                         {:offset offset
