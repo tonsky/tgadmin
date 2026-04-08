@@ -23,16 +23,6 @@
         (catch Throwable t
           (.printStackTrace t))))))
 
-(defn schedule-impl [^long delay f]
-  (let [t (timer-task f)]
-    (.schedule timer t delay)
-    #(.cancel t)))
-
-(defmacro schedule [delay & body]
-  `(schedule-impl ~delay
-     (fn []
-       ~@body)))
-
 (defn swap-dissoc! [*atom key]
   (let [[before after] (swap-vals! *atom dissoc key)]
     (get before key)))
@@ -42,13 +32,38 @@
     s
     (str (subs s 0 80) "...")))
 
+
 ;; config
 
 (def config
   (edn/read-string (slurp "config.edn")))
 
+(def dev?
+  (:dev? config false))
+
 (def token
   (:token config))
+
+(def vote-limit
+  (:vote-limit config 3))
+
+(def vote-ttl
+  (:vote-ttl config (* 24 60 60 1000)))
+
+(def repeated-messages-limit
+  (:repeated-messages-limit config 3))
+
+;; Time to first clown monitoring
+(def reaction-channel-id
+  (:reaction-channel-id config
+   #_-1002729833355 ;; nikitonsky_pub_test
+   -1001339432494))  ;; nikitonsky_pub
+
+(def reaction-group-id
+  (:reaction-group-id config
+   #_-1002762672757  ;; nikitonsky_chat_test
+   -1001436433940))  ;; nikitonsky_chat
+
 
 ;; Telegram API
 
@@ -78,6 +93,7 @@
        (.printStackTrace e)
        nil))))
 
+
 ;; state
 
 ;; #{user-id ...}
@@ -96,24 +112,10 @@
 (def *pending-votes
   (atom {}))
 
-(def vote-limit
-  3)
-
-(def vote-ttl
-  (* 24 60 60 1000))
-
-;; Time to first clown monitoring
-(def reaction-channel-id
-  #_-1002729833355 ;; nikitonsky_pub_test
-  -1001339432494)  ;; nikitonsky_pub
-
-(def reaction-group-id
-  #_-1002762672757 ;; nikitonsky_chat_test
-  -1001436433940)  ;; nikitonsky_chat
-
 (def *reaction-channel-posts
   "{message_id {:date timestamp}}"
   (atom {}))
+
 
 ;; app
 
@@ -145,11 +147,12 @@
       (when last_name (str " " last_name)))))
 
 (defn whitelist-user [user]
-  (swap! *known-users conj (:id user))
   (println "[ WHITELIST ]" (user-str user))
-  (with-open [w (FileWriter. (io/file "known_users") true)]
-    (.write w (user-str user))
-    (.write w "\n")))
+  (when-not dev?
+    (swap! *known-users conj (:id user))
+    (with-open [w (FileWriter. (io/file "known_users") true)]
+      (.write w (user-str user))
+      (.write w "\n"))))
 
 (defn ban-user [user reason messages]
   (let [chat-id (:id (:chat (first messages)))]
@@ -157,7 +160,8 @@
       (println "[ DELETING ]" (message-str message) "for" reason)
       (post! "/deleteMessage" {:chat_id chat-id, :message_id (:message_id message)}))
     (println "[ BAN ]" (user-str user) "for" reason)
-    (post! "/banChatMember" {:chat_id chat-id, :user_id (:id user)})))
+    (when-not dev?
+      (post! "/banChatMember" {:chat_id chat-id, :user_id (:id user)}))))
 
 (defn vote-keyboard [user-id approve-count ban-count]
   {:inline_keyboard [[{:text          (str "🤖 Бот (" ban-count ")")
@@ -254,12 +258,20 @@
       ;; known
       (and
         (@*known-users user-id)
-        #_(not= "nikitonsky" (:username user)))
+        (or
+          (not dev?)
+          (not= "nikitonsky" (:username user))))
       :nop
 
       ;; pending -- collect messages
       (contains? @*pending-votes user-id)
-      (swap! *pending-votes update-in [user-id :messages] conj message)
+      (let [pending' (swap! *pending-votes update-in [user-id :messages] conj message)
+            messages (get-in pending' [user-id :messages])
+            max-freq (->> messages (keep :text) (filter #(> (count %) 10)) frequencies vals (reduce max 0))]
+        (when (>= max-freq repeated-messages-limit)
+          (when-some [pending (swap-dissoc! *pending-votes user-id)]
+            (post! "/deleteMessage" {:chat_id chat-id :message_id (-> pending :vote-message :message_id)})
+            (ban-user user "repeated messages" messages))))
 
       ;; unknown -- banned by lols
       :let [reason (check-external message)]
