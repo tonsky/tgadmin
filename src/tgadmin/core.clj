@@ -53,6 +53,9 @@
 (def repeated-messages-limit
   (:repeated-messages-limit config 3))
 
+(def admin-cache-ttl
+  (:admin-cache-ttl config (* 60 60 1000)))
+
 ;; Time to first clown monitoring
 (def reaction-channel-id
   (:reaction-channel-id config
@@ -112,6 +115,10 @@
 (def *pending-votes
   (atom {}))
 
+;; {chat-id {:admins #{user-id ...} :fetched timestamp}}
+(def *admin-cache
+  (atom {}))
+
 (def *reaction-channel-posts
   "{message_id {:date timestamp}}"
   (atom {}))
@@ -162,6 +169,17 @@
     (println "[ BAN ]" (user-str user) "for" reason)
     (when-not dev?
       (post! "/banChatMember" {:chat_id chat-id, :user_id (:id user)}))))
+
+(defn get-admins [chat-id]
+  (let [now    (System/currentTimeMillis)
+        cached (@*admin-cache chat-id)]
+    (if (and cached (< (- now (:fetched cached)) admin-cache-ttl))
+      (:admins cached)
+      (let [members (post! "/getChatAdministrators" {:chat_id chat-id})
+            admins  (set (map #(-> % :user :id) members))]
+        (println "[ ADMINS ] for" chat-id (str/join ", " (map #(-> % :user :username) members)))
+        (swap! *admin-cache assoc chat-id {:admins admins :fetched now})
+        admins))))
 
 (defn vote-keyboard [user-id approve-count ban-count]
   {:inline_keyboard [[{:text          (str "🤖 Бот (" ban-count ")")
@@ -221,6 +239,7 @@
          :text              "Вы уже проголосовали"})
 
       :let [_        (post! "/answerCallbackQuery" {:callback_query_id callback-id})
+            admins   (get-admins chat-id)
             vote     (fn [pending]
                        (if (= "approve" action)
                          (-> pending
@@ -233,13 +252,15 @@
                        (get target-id))]
 
       ;; approve
-      (>= (count (:approve pending')) vote-limit)
+      (or (>= (count (:approve pending')) vote-limit)
+          (some admins (:approve pending')))
       (when (swap-dissoc! *pending-votes target-id)
         (post! "/deleteMessage" {:chat_id chat-id :message_id (:message_id vote-message)})
         (whitelist-user target-user))
 
       ;; ban
-      (>= (count (:ban pending')) vote-limit)
+      (or (>= (count (:ban pending')) vote-limit)
+          (some admins (:ban pending')))
       (when (swap-dissoc! *pending-votes target-id)
         (post! "/deleteMessage" {:chat_id chat-id :message_id (:message_id vote-message)})
         (ban-user target-user "user vote" messages))
