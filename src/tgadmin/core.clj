@@ -255,6 +255,10 @@
         user-id (:id user)
         chat-id (:id (:chat message))]
     (cond+
+      ;; service messages (joins, etc.)
+      (:new_chat_members message)
+      :nop
+
       ;; known
       (and
         (@*known-users user-id)
