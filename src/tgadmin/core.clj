@@ -15,11 +15,11 @@
 (defonce ^Timer timer
   (Timer. true))
 
-(defn- timer-task ^TimerTask [f]
+(defn- timer-task ^TimerTask [var]
   (proxy [TimerTask] []
     (run []
       (try
-        (f)
+        (@var)
         (catch Throwable t
           (.printStackTrace t))))))
 
@@ -55,6 +55,10 @@
 
 (def admin-cache-ttl
   (:admin-cache-ttl config (* 60 60 1000)))
+
+;; private group used to probe if messages still exist, bot must be a member
+(def dump-group-id
+  (:dump-group-id config -5016389519))
 
 ;; Time to first clown monitoring
 (def reaction-channel-id
@@ -126,10 +130,10 @@
 
 ;; app
 
-(defn check-external [message]
+(defn check-external [user-id]
   (try
     (let [resp @(http/request
-                  {:url             (str "https://lols.bot/?a=" (:id (:from message)))
+                  {:url             (str "https://lols.bot/?a=" user-id)
                    :method          :get
                    :connect-timeout 5000})]
       (when (= 200 (:status resp))
@@ -138,6 +142,36 @@
             (str "banned at lols.bot")))))
     (catch Exception e
       (.printStackTrace e))))
+
+(defn message-exists? [message]
+  ;; there’s no getMessage in Bot API, so we forward message to a dump group
+  ;; and see if it fails. Deleted messages give “message to forward not found”
+  ;; in basic groups but “MESSAGE_ID_INVALID” in supergroups
+  (try
+    (let [resp @(http/request
+                  {:url     (str "https://api.telegram.org/bot" token "/forwardMessage")
+                   :method  :post
+                   :body    (json/generate-string
+                              {:chat_id              dump-group-id
+                               :from_chat_id         (:id (:chat message))
+                               :message_id           (:message_id message)
+                               :disable_notification true})
+                   :headers {"Content-Type" "application/json"}})
+          body (json/parse-string (:body resp) true)]
+      (if (:ok body)
+        (do
+          (post! "/deleteMessage"
+            {:chat_id    dump-group-id
+             :message_id (-> body :result :message_id)})
+          true)
+        (let [description (str (:description body))]
+          (not
+            (or
+              (str/includes? description "not found")
+              (str/includes? description "MESSAGE_ID_INVALID"))))))
+    (catch Exception e
+      (.printStackTrace e)
+      true)))
 
 (defn message-str [message]
   (str
@@ -213,6 +247,17 @@
        :ban          #{}
        :added        (System/currentTimeMillis)})))
 
+(defn resolve-vote!
+  "Removes user from pending votes and deletes vote message.
+   Returns pending map or nil if already resolved by someone else"
+  [user-id]
+  (when-some [pending (swap-dissoc! *pending-votes user-id)]
+    (let [vote-message (:vote-message pending)]
+      (post! "/deleteMessage"
+        {:chat_id    (-> vote-message :chat :id)
+         :message_id (:message_id vote-message)})
+      pending)))
+
 (defn handle-callback-query [callback-query]
   (let [callback-id           (:id callback-query)
         voter-id              (:id (:from callback-query))
@@ -222,7 +267,7 @@
         [_ action target-id]  (re-matches #"(approve|ban):(.*)" data)
         target-id             (some-> target-id parse-long)
         pending               (@*pending-votes target-id)
-        {:keys [approve ban messages vote-message]} pending
+        {:keys [approve ban messages]} pending
         target-user           (:from (first messages))]
 
     (cond+
@@ -254,16 +299,14 @@
       ;; approve
       (or (>= (count (:approve pending')) vote-limit)
           (some admins (:approve pending')))
-      (when (swap-dissoc! *pending-votes target-id)
-        (post! "/deleteMessage" {:chat_id chat-id :message_id (:message_id vote-message)})
+      (when (resolve-vote! target-id)
         (whitelist-user target-user))
 
       ;; ban
       (or (>= (count (:ban pending')) vote-limit)
           (some admins (:ban pending')))
-      (when (swap-dissoc! *pending-votes target-id)
-        (post! "/deleteMessage" {:chat_id chat-id :message_id (:message_id vote-message)})
-        (ban-user target-user "user vote" messages))
+      (when-some [pending (resolve-vote! target-id)]
+        (ban-user target-user "user vote" (:messages pending)))
 
       ;; update counts
       (post! "/editMessageReplyMarkup"
@@ -273,8 +316,7 @@
 
 (defn handle-message [message]
   (let [user    (:from message)
-        user-id (:id user)
-        chat-id (:id (:chat message))]
+        user-id (:id user)]
     (cond+
       ;; service messages (joins, etc.)
       (:new_chat_members message)
@@ -294,12 +336,11 @@
             messages (get-in pending' [user-id :messages])
             max-freq (->> messages (keep :text) (filter #(> (count %) 10)) frequencies vals (reduce max 0))]
         (when (>= max-freq repeated-messages-limit)
-          (when-some [pending (swap-dissoc! *pending-votes user-id)]
-            (post! "/deleteMessage" {:chat_id chat-id :message_id (-> pending :vote-message :message_id)})
-            (ban-user user "repeated messages" messages))))
+          (when-some [pending (resolve-vote! user-id)]
+            (ban-user user "repeated messages" (:messages pending)))))
 
       ;; unknown -- banned by lols
-      :let [reason (check-external message)]
+      :let [reason (check-external user-id)]
       reason
       (ban-user user reason [message])
 
@@ -346,6 +387,24 @@
     true
     prn))
 
+(defn check-pending-votes
+  "Re-checks every user with an open vote: bans if lols.bot now reports them,
+   retracts the vote if user deleted all their messages"
+  []
+  (doseq [[user-id pending] @*pending-votes
+          :let [user   (-> pending :messages first :from)
+                reason (check-external user-id)]]
+    (cond+
+      ;; reported as spammer while vote was in progress
+      reason
+      (when-some [pending (resolve-vote! user-id)]
+        (ban-user user reason (:messages pending)))
+
+      ;; user deleted all their messages -- retract vote, forget user
+      (not-any? message-exists? (:messages pending))
+      (when (resolve-vote! user-id)
+        (println "[ RETRACTED ]" (user-str user))))))
+
 (defn cleanup-pending-votes []
   (let [now (System/currentTimeMillis)]
     (doseq [[user-id {:keys [added]}] @*pending-votes]
@@ -355,7 +414,8 @@
 
 (defn -main [& args]
   (println "[ STARTED ]")
-  (.scheduleAtFixedRate timer (timer-task cleanup-pending-votes) 0 (* 60 60 1000))
+  (.scheduleAtFixedRate timer (timer-task #'cleanup-pending-votes) 0 (* 60 60 1000))
+  (.scheduleAtFixedRate timer (timer-task #'check-pending-votes) (* 60 1000) (* 60 1000))
   (loop [offset 0]
     (if-some [updates (post! "/getUpdates"
                         {:offset offset
