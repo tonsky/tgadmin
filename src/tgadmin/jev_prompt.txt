@@ -1,0 +1,71 @@
+Is this Telegram comment part of a spam campaign?
+
+Evaluate the top-level text or caption together with the sender's
+from.first_name, from.last_name, and from.username. reply_to_message
+provides background; evaluate the current sender and comment.
+
+Recognize these recurring Russian-language spam patterns:
+
+1. Easy-money recruitment:
+A stranger asks for people to perform a simple task today, tomorrow,
+or over the weekend, offering a specific payment for little work.
+Typical payments are 3000–8500 rubles; typical tasks include cleaning
+after renovations or banquets, moving tables, sorting clothes,
+loading toys, or minor repairs. Common wording:
+"кто может помочь", "нужны 3 человека", "ничего сложного",
+"за 2 часа", "отблагодарю", "рассчитаюсь на месте", "пишите в лс".
+A short offer such as "Убрать в актовом зале после ремонта,
+8500 рублей" matches this pattern too.
+
+2. Audiobook funnels:
+An unsolicited personal testimonial recommends a self-improvement,
+productivity, money, or success book, then offers its audio version.
+Typical titles/authors include "Время — деньги" / Генри Форд and
+"Психология достижений" / Брайан Трейси.
+Typical wording: "не ожидал, что настолько зайдёт",
+"не про то, как работать больше", "переосмыслить приоритеты",
+"есть аудиоверсия", "могу скинуть", "безвозмездно",
+"пишите в личку". The offer may be indirect: "если что есть аудио".
+
+3. Promotion through the sender's display name:
+A harmless-looking topical comment attracts attention to an
+advertisement embedded in the sender's name.
+Examples: "Дизайнер для Европы/США", "Дизайн на запад",
+"UX/UI дизайнер, США", "Высшее / среднее образование",
+"Образование: высшее, среднее", or cheap/uncensored AI services.
+Profiles often combine these phrases with uncommon female-sounding
+names such as Глафира, Венера, Клементина, Теона, or Амелия, and
+usernames containing Studio, Web, or Sites.
+The comment itself may simply say "Увы, это так" or
+"Вывод про Си неожиданный, но логика прикольная".
+
+4. Flirtatious profile bait:
+A brief flattering, teasing, or generic reaction comes from a
+sexualized or flirtatious profile: names containing "Сладкая",
+"Люкс", "Чарм", "встречи", or bikini/angel imagery.
+Examples: "а ты умеешь заинтриговать 😏",
+"обожаю твою занудность 😏", "Приглашу либо приеду".
+Consider the combination of the profile and comment.
+
+5. Manufactured topical engagement:
+The reply repeats keywords or conclusions from the post and adds
+generic agreement, praise, sympathy, or exaggerated emotion.
+Examples include shallow summaries of Rust versus Ruby, agreement
+about placeholders, "держись! Плюс лайк за честность", or
+"Давно пользуюсь👍".
+Supporting signals include promotional or flirtatious profiles,
+template-like wording, awkward phrasing, and mismatched grammatical
+gender. A comment can be fluent and relevant while serving as spam.
+
+6. Disguised service referrals:
+A conversational reply suddenly recommends a particular provider
+or @account with a canned endorsement: "летает отлично",
+"батарею почти не ест", or a list of promotional selling points.
+
+7. Bot-link drops:
+One or several @...bot mentions, especially random-looking names,
+with no substantive conversation or with unrelated gibberish.
+
+A clear match to any campaign pattern is sufficient. For generic
+engagement, assess the combination of wording and profile signals.
+A visible link, explicit sale, or request for payment is not required.

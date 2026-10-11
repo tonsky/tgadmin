@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a Telegram moderation bot written in Clojure that detects and bans spam accounts in Telegram groups. New users are checked against an external spam database, and their first message triggers a community vote ("bot or not?") that decides whether to whitelist or ban them.
+This is a Telegram moderation bot written in Clojure that detects and bans spam accounts in Telegram groups. New users are checked against an external spam database and (optionally) the Jev spam classifier, and their first message triggers a community vote ("bot or not?") that decides whether to whitelist or ban them.
 
 ## Key Commands
 
@@ -23,11 +23,12 @@ There is no test suite.
    - Long-polling loop over Telegram `getUpdates` (`-main`)
    - Community vote system for first-time posters
    - External spam-database checks (lols.bot)
+   - Jev (TypeSafe) spam classification of first messages
    - User management (whitelisting, banning)
    - "Time to first 🤡 reaction" channel monitoring (unrelated to moderation)
 
 2. **Configuration**:
-   - `config.edn` — bot token and settings: `:dev?`, `:vote-limit` (default 3), `:vote-ttl` (default 24h), `:repeated-messages-limit` (default 3), `:admin-cache-ttl` (default 1h), `:reaction-channel-id`, `:reaction-group-id`
+   - `config.edn` — bot token and settings: `:dev?`, `:vote-limit` (default 3), `:vote-ttl` (default 24h), `:repeated-messages-limit` (default 3), `:admin-cache-ttl` (default 1h), `:reaction-channel-id`, `:reaction-group-id`, `:jev-api-key` (optional, enables the Jev check), `:jev-threshold` (default 0.7)
    - `known_users` — persistent append-only storage of whitelisted user IDs
 
 3. **State Management** (all atoms in `tgadmin.core`):
@@ -40,14 +41,15 @@ There is no test suite.
 
 1. Known users pass through untouched
 2. Unknown users are checked against the https://lols.bot spam database; if banned there, they are banned immediately
-3. Otherwise the bot replies to their first message with a vote: inline keyboard "🤖 Бот / 🧑 Не бот"
+3. If `:jev-api-key` is set, their first message is sent to Jev (https://docs.typesafe.ai) as a yes/no “is this spam?” question with the prompt from `src/tgadmin/jev_prompt.txt`; a spam probability of `jev-threshold` or higher bans them immediately. Without the key, or on any API error, the step is skipped
+4. Otherwise the bot replies to their first message with a vote: inline keyboard "🤖 Бот / 🧑 Не бот"
    - `vote-limit` votes on either side decide the outcome; a single admin vote decides immediately
    - Approve → whitelist; ban → delete all their messages and ban
-4. While a vote is pending, further messages from the user are collected; posting the same message `repeated-messages-limit` times gets them banned outright
-5. A timer re-checks every user with an open vote once a minute:
+5. While a vote is pending, further messages from the user are collected; posting the same message `repeated-messages-limit` times gets them banned outright
+6. A timer re-checks every user with an open vote once a minute:
    - re-queries lols.bot — if now reported as spammer, closes the vote and bans
    - probes whether their messages still exist — if the user deleted all of them, the vote is retracted and the user stays unknown
-6. Pending votes older than `vote-ttl` are cleaned up hourly (vote message stays, user stays unknown)
+7. Pending votes older than `vote-ttl` are cleaned up hourly (vote message stays, user stays unknown)
 
 Note: the Bot API sends no update when messages are deleted, so deletion is detected by probing with `forwardMessage` into a private dump group (`:dump-group-id` in config; the forward is deleted right away). A "message to forward not found" error means the message is gone; any other error fails open (`message-exists?`).
 
@@ -56,6 +58,7 @@ Note: the Bot API sends no update when messages are deleted, so deletion is dete
 - `handle-message` — main entry point for incoming messages
 - `handle-callback-query` — processes vote button presses
 - `check-external` — queries lols.bot by user ID
+- `check-jev` — asks Jev whether a first message is spam (only text/caption, sender name/username and the replied-to message are sent)
 - `start-vote` — posts the vote message for a first-time poster
 - `resolve-vote!` — atomically removes a pending vote and deletes the vote message; every vote outcome goes through it
 - `check-pending-votes` — the per-minute re-check (lols.bot + deleted-messages probe)

@@ -56,6 +56,13 @@
 (def admin-cache-ttl
   (:admin-cache-ttl config (* 60 60 1000)))
 
+;; https://docs.typesafe.ai, skipped if not set
+(def jev-api-key
+  (:jev-api-key config))
+
+(def jev-threshold
+  (:jev-threshold config 0.7))
+
 ;; private group used to probe if messages still exist, bot must be a member
 (def dump-group-id
   (:dump-group-id config -5016389519))
@@ -179,6 +186,41 @@
     " by " (:id (:from message))
     (when-some [username (:username (:from message))]
       (str " (" username ")"))))
+
+(def jev-prompt
+  (slurp (io/resource "tgadmin/jev_prompt.txt")))
+
+(defn check-jev [message]
+  (when jev-api-key
+    (try
+      (let [select #(-> %
+                      (select-keys [:text :caption :from])
+                      (update :from select-keys [:first_name :last_name :username]))
+            state  (cond-> (select message)
+                     (:reply_to_message message)
+                     (assoc :reply_to_message (select (:reply_to_message message))))
+            resp   @(http/request
+                      {:url             "https://api.typesafe.ai/v1/systemone"
+                       :method          :post
+                       :body            (json/generate-string
+                                          {:model     "jev-latest"
+                                           :state     state
+                                           :questions {:spam {:type         "noul"
+                                                              :instructions jev-prompt}}})
+                       :headers         {"Authorization" (str "Bearer " jev-api-key)
+                                         "Content-Type"  "application/json"}
+                       :connect-timeout 5000
+                       :timeout         15000})
+            body   (some-> (:body resp) (json/parse-string true))
+            noul   (-> body :answers :spam :noul)]
+        (if noul
+          (do
+            (println "[ JEV ]" (message-str message) "spam probability" noul)
+            (when (>= noul jev-threshold)
+              "spam by jev"))
+          (println "[ ERROR ]" (or (:error resp) body))))
+      (catch Exception e
+        (.printStackTrace e)))))
 
 (defn user-str ^String [user]
   (let [{:keys [id username first_name last_name]} user]
@@ -341,6 +383,11 @@
 
       ;; unknown -- banned by lols
       :let [reason (check-external user-id)]
+      reason
+      (ban-user user reason [message])
+
+      ;; unknown -- spam by jev
+      :let [reason (check-jev message)]
       reason
       (ban-user user reason [message])
 
