@@ -1,0 +1,54 @@
+name: build
+
+on:
+  push:
+    branches:
+      - 'main'
+    paths:
+      - '**.go'
+      - go.mod
+      - jev_prompt.txt
+      - .github/workflows/build.yml
+      - script/package.sh
+      - script/test.sh
+
+jobs:  
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+
+      - name: Test
+        run: ./script/test.sh
+
+      - name: Package
+        run: ./script/package.sh
+        env:
+          CGO_ENABLED: 0
+          GOOS: linux
+          GOARCH: amd64
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tgadmin
+          path: target/tgadmin
+
+      - name: Install SSH key
+        uses: shimataro/ssh-key-action@v2
+        with:
+          key: ${{ secrets.SSH_KEY }}
+          known_hosts: ${{ secrets.SSH_KNOWN_HOSTS }}
+
+      - name: Deploy
+        run: |
+          scp target/tgadmin tgadmin@tonsky.me:tgadmin.new
+          ssh tgadmin@tonsky.me "mv tgadmin.new tgadmin"
+
+      - name: Restart
+        run: |
+          ssh tgadmin@tonsky.me "kill \$(systemctl show --property MainPID --value tgadmin)"

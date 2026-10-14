@@ -15,3 +15,4 @@ pom.xml.asc
 config.edn
 known_users
 /data
+/tgadmin
