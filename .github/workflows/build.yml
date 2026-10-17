@@ -32,23 +32,3 @@ jobs:
           CGO_ENABLED: 0
           GOOS: linux
           GOARCH: amd64
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: tgadmin
-          path: target/tgadmin
-
-      - name: Install SSH key
-        uses: shimataro/ssh-key-action@v2
-        with:
-          key: ${{ secrets.SSH_KEY }}
-          known_hosts: ${{ secrets.SSH_KNOWN_HOSTS }}
-
-      - name: Deploy
-        run: |
-          scp target/tgadmin tgadmin@tonsky.me:tgadmin.new
-          ssh tgadmin@tonsky.me "mv tgadmin.new tgadmin"
-
-      - name: Restart
-        run: |
-          ssh tgadmin@tonsky.me "kill \$(systemctl show --property MainPID --value tgadmin)"

@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path"
+	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -145,6 +147,33 @@ func vote(action string, voterID, targetID int64) *CallbackQuery {
 
 const voteText = "send Голосуем! User — бот или нет?"
 
+// expectRecords checks that file has one line per want, each with its reason and message texts
+func expectRecords(t *testing.T, file string, want ...string) {
+	t.Helper()
+	data, _ := os.ReadFile(filepath.Join(config.DataDir, file))
+	var got []string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry struct {
+			Reason   string
+			Messages []struct{ Text string }
+		}
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("%s: %v", file, err)
+		}
+		texts := []string{}
+		for _, msg := range entry.Messages {
+			texts = append(texts, msg.Text)
+		}
+		got = append(got, entry.Reason+": "+strings.Join(texts, ", "))
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("%s:\n got %q\nwant %q", file, got, want)
+	}
+}
+
 func TestKnownUser(t *testing.T) {
 	f := setup(t)
 	knownUsers[5] = true
@@ -161,6 +190,7 @@ func TestBannedAtLols(t *testing.T) {
 	if len(pendingVotes) != 0 {
 		t.Error("vote started for a banned user")
 	}
+	expectRecords(t, lolsSpamFile, "banned at lols.bot: hi")
 }
 
 func TestJev(t *testing.T) {
@@ -186,9 +216,19 @@ func TestJev(t *testing.T) {
 		t.Errorf("jev state:\n got %v\nwant %v", f.jevState, want)
 	}
 
+	expectRecords(t, jevSpamFile, "spam by jev: hi")
+
 	f.noul = 0.69
 	handleMessage(message(11, 6, "hi"))
 	f.expect(t, voteText)
+	if jev := pendingVotes[6].jev; jev == nil || *jev != 0.69 {
+		t.Errorf("jev score not kept for the vote: %v", jev)
+	}
+	handleCallbackQuery(vote("approve", adminID, 6))
+	data, _ := os.ReadFile(filepath.Join(config.DataDir, notSpamFile))
+	if !strings.Contains(string(data), `"jev":0.69`) {
+		t.Errorf("jev score not recorded: %s", data)
+	}
 }
 
 func TestApprove(t *testing.T) {
@@ -217,6 +257,7 @@ func TestApprove(t *testing.T) {
 	if data, _ := os.ReadFile(knownUsersPath()); string(data) != "5 User\n" {
 		t.Errorf("known_users: %q", data)
 	}
+	expectRecords(t, notSpamFile, "user vote: hi")
 
 	// late vote, garbage, and the user is known now
 	handleCallbackQuery(vote("ban", 14, 5))
@@ -237,6 +278,7 @@ func TestAdminBan(t *testing.T) {
 	if knownUsers[5] || len(pendingVotes) != 0 {
 		t.Error("banned user is still around")
 	}
+	expectRecords(t, voteSpamFile, "admin vote: hi, hi again")
 }
 
 func TestRepeatedMessages(t *testing.T) {
@@ -253,6 +295,7 @@ func TestRepeatedMessages(t *testing.T) {
 	f.expect(t, "delete -100/1000",
 		"delete -100/10", "delete -100/11", "delete -100/12", "delete -100/13",
 		"delete -100/14", "delete -100/15", "delete -100/16", "ban 5")
+	expectRecords(t, voteSpamFile, "repeated messages: hi, hi, hi, hi, buy my stuff, buy my stuff, buy my stuff")
 }
 
 func TestCheckPendingVotes(t *testing.T) {
@@ -268,6 +311,7 @@ func TestCheckPendingVotes(t *testing.T) {
 	f.spammers[5] = true
 	checkPendingVotes()
 	f.expect(t, "delete -100/1000", "delete -100/10", "ban 5")
+	expectRecords(t, lolsSpamFile, "banned at lols.bot: hi")
 
 	// user deleted one message, then all of them
 	handleMessage(message(20, 6, "hi"))
@@ -282,6 +326,8 @@ func TestCheckPendingVotes(t *testing.T) {
 	if knownUsers[6] || len(pendingVotes) != 0 {
 		t.Error("vote was not retracted")
 	}
+	expectRecords(t, notSpamFile)
+	expectRecords(t, voteSpamFile)
 }
 
 func TestCleanupPendingVotes(t *testing.T) {
@@ -332,6 +378,13 @@ func TestPoll(t *testing.T) {
 		"answer", "getChatAdministrators", "delete -100/1000")
 	if data, _ := os.ReadFile(knownUsersPath()); string(data) != "232806939 @nikitonsky Nikita Prokopov\n" {
 		t.Errorf("known_users: %q", data)
+	}
+	// messages are recorded as Telegram sent them
+	data, _ := os.ReadFile(filepath.Join(config.DataDir, notSpamFile))
+	for _, want := range []string{`"reason":"admin vote"`, `"title":"Grumpy <Queue>"`, `"message_thread_id":8`, `"entities":[{"offset":0,"length":5,"type":"bold"}]`} {
+		if !strings.Contains(string(data), want) {
+			t.Errorf("%s: no %s in %s", notSpamFile, want, data)
+		}
 	}
 
 	if offset = poll(offset); offset != 558841696 {

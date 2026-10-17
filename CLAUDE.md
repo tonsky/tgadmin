@@ -14,7 +14,7 @@ It only uses the standard library, there are no dependencies.
 - **Run tests**: `./script/test.sh` (`go vet` + `go test -race`)
 - **Build binary**: `./script/package.sh` (creates `target/tgadmin`)
 
-Pushing to `main` builds a linux/amd64 binary, copies it to the server and restarts the service (`.github/workflows/build.yml`).
+Pushing to `main` runs the tests and a linux/amd64 build in CI (`.github/workflows/build.yml`). Deploys are done by Houston, which builds on the server with `go build -o tgadmin ./cmd/tgadmin`.
 
 ## Architecture
 
@@ -37,6 +37,7 @@ Pushing to `main` builds a linux/amd64 binary, copies it to the server and resta
    - Settings come from command-line flags and `TGADMIN_*` env vars; a flag wins over its env var, which wins over the default. Each flag `-some-name` has env var `TGADMIN_SOME_NAME`: `-token` (required), `-dev`, `-vote-limit` (default 3), `-vote-ttl` (Go duration, default `24h`), `-repeated-messages-limit` (default 3), `-admin-cache-ttl` (Go duration, default `1h`), `-dump-group-id`, `-jev-api-key` (optional, enables the Jev check), `-jev-threshold` (default 0.7), and `-data-dir` (default `.`), whose env var is `DATA_DIR` without the prefix, because Houston sets it. `tgadmin -h` lists them
    - `mise.local.toml` — local env vars for development (token, keys, `TGADMIN_DEV`), gitignored
    - `known_users` in the data dir — persistent append-only storage of whitelisted user IDs
+   - `lols_spam.jsonl`, `jev_spam.jsonl`, `vote_spam.jsonl` (vote bans and repeated messages), `not_spam.jsonl` (whitelisted after a vote) in the data dir — one JSON line per decision: `time`, `reason`, `jev` (spam probability, if checked) and `messages` as Telegram sent them. Written in dev mode too. Meant for tuning the Jev prompt
    - `internal/tgadmin/jev_prompt.txt` — the Jev prompt, embedded into the binary
 
 3. **State Management** (package-level variables in `bot.go`):
@@ -78,3 +79,7 @@ Note: the Bot API sends no update when messages are deleted, so deletion is dete
 ### Dev Mode
 
 With `-dev` (or `TGADMIN_DEV=true`), the actual ban call and `known_users` writes are skipped (logged only; message deletion still happens), and messages from `nikitonsky` are treated as coming from an unknown user for testing.
+
+### Logging
+
+Only the first message of an unknown user, the one that goes through the checks, is printed in full (`[ CHECK ] <json>`). Everything else is one-line events: `[ VOTE ]`, `[ VOTED ]`, `[ BAN ]`, `[ WHITELIST ]` and so on.

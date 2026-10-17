@@ -34,6 +34,26 @@ type Message struct {
 	Caption        string   `json:"caption"`
 	ReplyToMessage *Message `json:"reply_to_message"`
 	NewChatMembers []User   `json:"new_chat_members"`
+	// the message as Telegram sent it, for logs and records
+	raw json.RawMessage
+}
+
+func (m *Message) UnmarshalJSON(data []byte) error {
+	type plain Message
+	if err := json.Unmarshal(data, (*plain)(m)); err != nil {
+		return err
+	}
+	m.raw = bytes.Clone(data)
+	return nil
+}
+
+// rawJSON returns the message as received, or re-encoded if it was made in code
+func (m *Message) rawJSON() json.RawMessage {
+	if m.raw != nil {
+		return m.raw
+	}
+	data, _ := json.Marshal(m)
+	return data
 }
 
 type CallbackQuery struct {

@@ -33,6 +33,7 @@ type pendingVote struct {
 	approve     map[int64]bool // voter IDs
 	ban         map[int64]bool
 	added       time.Time
+	jev         *float64 // spam probability of the first message, nil if not checked
 }
 
 // open votes by user ID, shared between the update loop and the timers.
@@ -170,9 +171,10 @@ func jevSelect(msg *Message) *jevMessage {
 	return res
 }
 
-func checkJev(msg *Message) string {
+// checkJev returns spam probability of msg, or nil if Jev is off or failed
+func checkJev(msg *Message) *float64 {
 	if config.JevAPIKey == "" {
-		return ""
+		return nil
 	}
 	state := jevSelect(msg)
 	if msg.ReplyToMessage != nil {
@@ -188,7 +190,7 @@ func checkJev(msg *Message) string {
 		15*time.Second)
 	if err != nil {
 		fmt.Println("[ ERROR ] jev", err)
-		return ""
+		return nil
 	}
 	var body struct {
 		Answers struct {
@@ -201,13 +203,10 @@ func checkJev(msg *Message) string {
 	noul := body.Answers.Spam.Noul
 	if err != nil || noul == nil {
 		fmt.Println("[ ERROR ] jev", string(data))
-		return ""
+		return nil
 	}
 	fmt.Println("[ JEV ]", messageStr(msg), "spam probability", *noul)
-	if *noul >= config.JevThreshold {
-		return "spam by jev"
-	}
-	return ""
+	return noul
 }
 
 func knownUsersPath() string {
@@ -241,10 +240,45 @@ func whitelistUser(user *User) {
 		return
 	}
 	knownUsers[user.ID] = true
-	f, err := os.OpenFile(knownUsersPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err := appendLine(knownUsersPath(), []byte(userStr(user)+"\n")); err != nil {
+		fmt.Println("[ ERROR ]", err)
+	}
+}
+
+func appendLine(path string, line []byte) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(line)
+	return errors.Join(err, f.Close())
+}
+
+// files in the data dir with checked messages by outcome, to tune the Jev prompt later
+const (
+	lolsSpamFile = "lols_spam.jsonl"
+	jevSpamFile  = "jev_spam.jsonl"
+	voteSpamFile = "vote_spam.jsonl"
+	notSpamFile  = "not_spam.jsonl"
+)
+
+// record appends a JSON line with the outcome and messages as Telegram sent them
+func record(file, reason string, jev *float64, messages []*Message) {
+	entry := struct {
+		Time     time.Time         `json:"time"`
+		Reason   string            `json:"reason"`
+		Jev      *float64          `json:"jev,omitempty"`
+		Messages []json.RawMessage `json:"messages"`
+	}{Time: time.Now().UTC(), Reason: reason, Jev: jev}
+	for _, msg := range messages {
+		entry.Messages = append(entry.Messages, msg.rawJSON())
+	}
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	err := encoder.Encode(entry)
 	if err == nil {
-		_, err = f.WriteString(userStr(user) + "\n")
-		err = errors.Join(err, f.Close())
+		err = appendLine(filepath.Join(config.DataDir, file), buf.Bytes())
 	}
 	if err != nil {
 		fmt.Println("[ ERROR ]", err)
@@ -290,7 +324,7 @@ func voteKeyboard(userID int64, approveCount, banCount int) params {
 	}}}
 }
 
-func startVote(msg *Message) {
+func startVote(msg *Message, jev *float64) {
 	user := msg.From
 	fmt.Println("[ VOTE ]", messageStr(msg))
 	mention := strings.TrimSpace(user.FirstName + " " + user.LastName)
@@ -316,6 +350,7 @@ func startVote(msg *Message) {
 		approve:     map[int64]bool{},
 		ban:         map[int64]bool{},
 		added:       time.Now(),
+		jev:         jev,
 	}
 }
 
@@ -363,6 +398,7 @@ func handleCallbackQuery(query *CallbackQuery) {
 	}
 	voterID := query.From.ID
 	chatID := query.Message.Chat.ID
+	fmt.Println("[ VOTED ]", userStr(&query.From), action, targetID)
 
 	votesMu.Lock()
 	pending := pendingVotes[targetID]
@@ -399,20 +435,27 @@ func handleCallbackQuery(query *CallbackQuery) {
 		delete(pending.approve, voterID)
 	}
 	approveCount, banCount := len(pending.approve), len(pending.ban)
-	approved := approveCount >= config.VoteLimit || anyOf(pending.approve, admins)
-	banned := banCount >= config.VoteLimit || anyOf(pending.ban, admins)
+	adminApproved, adminBanned := anyOf(pending.approve, admins), anyOf(pending.ban, admins)
+	approved := approveCount >= config.VoteLimit || adminApproved
+	banned := banCount >= config.VoteLimit || adminBanned
 	targetUser := pending.messages[0].From
 	votesMu.Unlock()
 
+	reason := "user vote"
+	if adminApproved || adminBanned {
+		reason = "admin vote"
+	}
 	switch {
 	case approved:
-		if resolveVote(targetID) != nil {
+		if pending := resolveVote(targetID); pending != nil {
 			whitelistUser(targetUser)
+			record(notSpamFile, reason, pending.jev, pending.messages)
 		}
 
 	case banned:
 		if pending := resolveVote(targetID); pending != nil {
-			banUser(targetUser, "user vote", pending.messages)
+			banUser(targetUser, reason, pending.messages)
+			record(voteSpamFile, reason, pending.jev, pending.messages)
 		}
 
 	// update counts
@@ -462,26 +505,32 @@ func handleMessage(msg *Message) {
 		if maxFreq >= config.RepeatedMessagesLimit {
 			if pending := resolveVote(user.ID); pending != nil {
 				banUser(user, "repeated messages", pending.messages)
+				record(voteSpamFile, "repeated messages", pending.jev, pending.messages)
 			}
 		}
 		return
 	}
 
-	// unknown -- banned by lols
-	reason := checkExternal(user.ID)
+	// unknown -- first message goes through the checks
+	logMessage(msg)
 
-	// unknown -- spam by jev
-	if reason == "" {
-		reason = checkJev(msg)
-	}
-
-	if reason != "" {
+	// banned by lols
+	if reason := checkExternal(user.ID); reason != "" {
 		banUser(user, reason, []*Message{msg})
+		record(lolsSpamFile, reason, nil, []*Message{msg})
 		return
 	}
 
-	// first message -- start community vote
-	startVote(msg)
+	// spam by jev
+	jev := checkJev(msg)
+	if jev != nil && *jev >= config.JevThreshold {
+		banUser(user, "spam by jev", []*Message{msg})
+		record(jevSpamFile, "spam by jev", jev, []*Message{msg})
+		return
+	}
+
+	// start community vote
+	startVote(msg, jev)
 }
 
 // checkPendingVotes re-checks every user with an open vote: bans if lols.bot
@@ -500,6 +549,7 @@ func checkPendingVotes() {
 			// reported as spammer while vote was in progress
 			if pending := resolveVote(userID); pending != nil {
 				banUser(user, reason, pending.messages)
+				record(lolsSpamFile, reason, pending.jev, pending.messages)
 			}
 		} else if !slices.ContainsFunc(messages, messageExists) {
 			// user deleted all their messages -- retract vote, forget user
@@ -534,25 +584,27 @@ func runTimers() {
 	}
 }
 
-func logUpdate(raw json.RawMessage) {
-	var update map[string]any
+// logMessage prints a message that goes through the spam checks
+func logMessage(msg *Message) {
+	raw := msg.rawJSON()
+	var message map[string]any
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
-	if err := decoder.Decode(&update); err != nil {
-		fmt.Println(string(raw))
+	if err := decoder.Decode(&message); err != nil {
+		fmt.Println("[ CHECK ]", string(raw))
 		return
 	}
 	// replies to channel posts carry the whole post
-	if message, ok := update["message"].(map[string]any); ok {
-		if reply, ok := message["reply_to_message"].(map[string]any); ok {
-			if text, ok := reply["text"].(string); ok {
-				reply["text"] = trim(text)
-			}
+	if reply, ok := message["reply_to_message"].(map[string]any); ok {
+		if text, ok := reply["text"].(string); ok {
+			reply["text"] = trim(text)
 		}
 	}
-	encoder := json.NewEncoder(os.Stdout)
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
 	encoder.SetEscapeHTML(false)
-	encoder.Encode(update)
+	encoder.Encode(message)
+	fmt.Print("[ CHECK ] ", buf.String())
 }
 
 var retryDelay = 5 * time.Second
@@ -575,10 +627,9 @@ func poll(offset int64) int64 {
 		return offset
 	}
 	for _, raw := range updates {
-		logUpdate(raw)
 		var update Update
 		if err := json.Unmarshal(raw, &update); err != nil {
-			fmt.Println("[ ERROR ]", err)
+			fmt.Println("[ ERROR ]", err, string(raw))
 		}
 		offset = max(offset, update.UpdateID+1)
 		safely(func() { handleUpdate(&update) })
