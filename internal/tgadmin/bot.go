@@ -33,7 +33,6 @@ type pendingVote struct {
 	approve     map[int64]bool // voter IDs
 	ban         map[int64]bool
 	added       time.Time
-	jev         *float64 // spam probability of the first message, nil if not checked
 }
 
 // open votes by user ID, shared between the update loop and the timers.
@@ -254,7 +253,8 @@ func appendLine(path string, line []byte) error {
 	return errors.Join(err, f.Close())
 }
 
-// files in the data dir with checked messages by outcome, to tune the Jev prompt later
+// files in the data dir with checked messages by outcome, one message per line
+// as Telegram sent it, to tune the Jev prompt later
 const (
 	lolsSpamFile = "lols_spam.jsonl"
 	jevSpamFile  = "jev_spam.jsonl"
@@ -262,25 +262,16 @@ const (
 	notSpamFile  = "not_spam.jsonl"
 )
 
-// record appends a JSON line with the outcome and messages as Telegram sent them
-func record(file, reason string, jev *float64, messages []*Message) {
-	entry := struct {
-		Time     time.Time         `json:"time"`
-		Reason   string            `json:"reason"`
-		Jev      *float64          `json:"jev,omitempty"`
-		Messages []json.RawMessage `json:"messages"`
-	}{Time: time.Now().UTC(), Reason: reason, Jev: jev}
-	for _, msg := range messages {
-		entry.Messages = append(entry.Messages, msg.rawJSON())
-	}
+func record(file string, messages []*Message) {
 	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
-	encoder.SetEscapeHTML(false)
-	err := encoder.Encode(entry)
-	if err == nil {
-		err = appendLine(filepath.Join(config.DataDir, file), buf.Bytes())
+	for _, msg := range messages {
+		if err := json.Compact(&buf, msg.rawJSON()); err != nil {
+			fmt.Println("[ ERROR ]", err)
+			return
+		}
+		buf.WriteByte('\n')
 	}
-	if err != nil {
+	if err := appendLine(filepath.Join(config.DataDir, file), buf.Bytes()); err != nil {
 		fmt.Println("[ ERROR ]", err)
 	}
 }
@@ -324,7 +315,7 @@ func voteKeyboard(userID int64, approveCount, banCount int) params {
 	}}}
 }
 
-func startVote(msg *Message, jev *float64) {
+func startVote(msg *Message) {
 	user := msg.From
 	fmt.Println("[ VOTE ]", messageStr(msg))
 	mention := strings.TrimSpace(user.FirstName + " " + user.LastName)
@@ -350,7 +341,6 @@ func startVote(msg *Message, jev *float64) {
 		approve:     map[int64]bool{},
 		ban:         map[int64]bool{},
 		added:       time.Now(),
-		jev:         jev,
 	}
 }
 
@@ -449,13 +439,13 @@ func handleCallbackQuery(query *CallbackQuery) {
 	case approved:
 		if pending := resolveVote(targetID); pending != nil {
 			whitelistUser(targetUser)
-			record(notSpamFile, reason, pending.jev, pending.messages)
+			record(notSpamFile, pending.messages)
 		}
 
 	case banned:
 		if pending := resolveVote(targetID); pending != nil {
 			banUser(targetUser, reason, pending.messages)
-			record(voteSpamFile, reason, pending.jev, pending.messages)
+			record(voteSpamFile, pending.messages)
 		}
 
 	// update counts
@@ -505,7 +495,7 @@ func handleMessage(msg *Message) {
 		if maxFreq >= config.RepeatedMessagesLimit {
 			if pending := resolveVote(user.ID); pending != nil {
 				banUser(user, "repeated messages", pending.messages)
-				record(voteSpamFile, "repeated messages", pending.jev, pending.messages)
+				record(voteSpamFile, pending.messages)
 			}
 		}
 		return
@@ -517,7 +507,7 @@ func handleMessage(msg *Message) {
 	// banned by lols
 	if reason := checkExternal(user.ID); reason != "" {
 		banUser(user, reason, []*Message{msg})
-		record(lolsSpamFile, reason, nil, []*Message{msg})
+		record(lolsSpamFile, []*Message{msg})
 		return
 	}
 
@@ -525,12 +515,12 @@ func handleMessage(msg *Message) {
 	jev := checkJev(msg)
 	if jev != nil && *jev >= config.JevThreshold {
 		banUser(user, "spam by jev", []*Message{msg})
-		record(jevSpamFile, "spam by jev", jev, []*Message{msg})
+		record(jevSpamFile, []*Message{msg})
 		return
 	}
 
 	// start community vote
-	startVote(msg, jev)
+	startVote(msg)
 }
 
 // checkPendingVotes re-checks every user with an open vote: bans if lols.bot
@@ -549,7 +539,7 @@ func checkPendingVotes() {
 			// reported as spammer while vote was in progress
 			if pending := resolveVote(userID); pending != nil {
 				banUser(user, reason, pending.messages)
-				record(lolsSpamFile, reason, pending.jev, pending.messages)
+				record(lolsSpamFile, pending.messages)
 			}
 		} else if !slices.ContainsFunc(messages, messageExists) {
 			// user deleted all their messages -- retract vote, forget user

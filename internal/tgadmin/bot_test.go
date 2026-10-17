@@ -147,29 +147,22 @@ func vote(action string, voterID, targetID int64) *CallbackQuery {
 
 const voteText = "send Голосуем! User — бот или нет?"
 
-// expectRecords checks that file has one line per want, each with its reason and message texts
+// expectRecords checks message texts in file, one message per line
 func expectRecords(t *testing.T, file string, want ...string) {
 	t.Helper()
 	data, _ := os.ReadFile(filepath.Join(config.DataDir, file))
-	var got []string
+	got := []string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		if line == "" {
 			continue
 		}
-		var entry struct {
-			Reason   string
-			Messages []struct{ Text string }
+		var msg Message
+		if err := json.Unmarshal([]byte(line), &msg); err != nil || msg.MessageID == 0 {
+			t.Fatalf("%s: not a message: %s, %v", file, line, err)
 		}
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			t.Fatalf("%s: %v", file, err)
-		}
-		texts := []string{}
-		for _, msg := range entry.Messages {
-			texts = append(texts, msg.Text)
-		}
-		got = append(got, entry.Reason+": "+strings.Join(texts, ", "))
+		got = append(got, msg.Text)
 	}
-	if !slices.Equal(got, want) {
+	if !slices.Equal(got, append([]string{}, want...)) {
 		t.Errorf("%s:\n got %q\nwant %q", file, got, want)
 	}
 }
@@ -190,7 +183,7 @@ func TestBannedAtLols(t *testing.T) {
 	if len(pendingVotes) != 0 {
 		t.Error("vote started for a banned user")
 	}
-	expectRecords(t, lolsSpamFile, "banned at lols.bot: hi")
+	expectRecords(t, lolsSpamFile, "hi")
 }
 
 func TestJev(t *testing.T) {
@@ -216,19 +209,11 @@ func TestJev(t *testing.T) {
 		t.Errorf("jev state:\n got %v\nwant %v", f.jevState, want)
 	}
 
-	expectRecords(t, jevSpamFile, "spam by jev: hi")
+	expectRecords(t, jevSpamFile, "hi")
 
 	f.noul = 0.69
 	handleMessage(message(11, 6, "hi"))
 	f.expect(t, voteText)
-	if jev := pendingVotes[6].jev; jev == nil || *jev != 0.69 {
-		t.Errorf("jev score not kept for the vote: %v", jev)
-	}
-	handleCallbackQuery(vote("approve", adminID, 6))
-	data, _ := os.ReadFile(filepath.Join(config.DataDir, notSpamFile))
-	if !strings.Contains(string(data), `"jev":0.69`) {
-		t.Errorf("jev score not recorded: %s", data)
-	}
 }
 
 func TestApprove(t *testing.T) {
@@ -257,7 +242,7 @@ func TestApprove(t *testing.T) {
 	if data, _ := os.ReadFile(knownUsersPath()); string(data) != "5 User\n" {
 		t.Errorf("known_users: %q", data)
 	}
-	expectRecords(t, notSpamFile, "user vote: hi")
+	expectRecords(t, notSpamFile, "hi")
 
 	// late vote, garbage, and the user is known now
 	handleCallbackQuery(vote("ban", 14, 5))
@@ -278,7 +263,7 @@ func TestAdminBan(t *testing.T) {
 	if knownUsers[5] || len(pendingVotes) != 0 {
 		t.Error("banned user is still around")
 	}
-	expectRecords(t, voteSpamFile, "admin vote: hi, hi again")
+	expectRecords(t, voteSpamFile, "hi", "hi again")
 }
 
 func TestRepeatedMessages(t *testing.T) {
@@ -295,7 +280,7 @@ func TestRepeatedMessages(t *testing.T) {
 	f.expect(t, "delete -100/1000",
 		"delete -100/10", "delete -100/11", "delete -100/12", "delete -100/13",
 		"delete -100/14", "delete -100/15", "delete -100/16", "ban 5")
-	expectRecords(t, voteSpamFile, "repeated messages: hi, hi, hi, hi, buy my stuff, buy my stuff, buy my stuff")
+	expectRecords(t, voteSpamFile, "hi", "hi", "hi", "hi", "buy my stuff", "buy my stuff", "buy my stuff")
 }
 
 func TestCheckPendingVotes(t *testing.T) {
@@ -311,7 +296,7 @@ func TestCheckPendingVotes(t *testing.T) {
 	f.spammers[5] = true
 	checkPendingVotes()
 	f.expect(t, "delete -100/1000", "delete -100/10", "ban 5")
-	expectRecords(t, lolsSpamFile, "banned at lols.bot: hi")
+	expectRecords(t, lolsSpamFile, "hi")
 
 	// user deleted one message, then all of them
 	handleMessage(message(20, 6, "hi"))
@@ -380,8 +365,9 @@ func TestPoll(t *testing.T) {
 		t.Errorf("known_users: %q", data)
 	}
 	// messages are recorded as Telegram sent them
+	expectRecords(t, notSpamFile, "reply")
 	data, _ := os.ReadFile(filepath.Join(config.DataDir, notSpamFile))
-	for _, want := range []string{`"reason":"admin vote"`, `"title":"Grumpy <Queue>"`, `"message_thread_id":8`, `"entities":[{"offset":0,"length":5,"type":"bold"}]`} {
+	for _, want := range []string{`{"message_id":13,"from":{"id":232806939,`, `"title":"Grumpy <Queue>"`, `"message_thread_id":8`, `"entities":[{"offset":0,"length":5,"type":"bold"}]}` + "\n"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("%s: no %s in %s", notSpamFile, want, data)
 		}
