@@ -12,7 +12,7 @@ pom.xml.asc
 *.sublime-project
 /.cpcache*
 .DS_Store
-config.edn
+mise.local.toml
 known_users
 /data
 /tgadmin

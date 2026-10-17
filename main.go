@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io/fs"
 	"os"
@@ -582,8 +583,11 @@ func poll(offset int64) int64 {
 
 func main() {
 	var err error
-	if config, err = loadConfig("config.edn"); err == nil {
+	if config, err = loadConfig(os.Args[1:], os.Getenv); err == nil {
 		knownUsers, err = loadKnownUsers("known_users")
+	}
+	if errors.Is(err, flag.ErrHelp) {
+		os.Exit(0)
 	}
 	if err != nil {
 		fmt.Println("[ ERROR ]", err)

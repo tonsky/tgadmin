@@ -1,10 +1,8 @@
 package main
 
 import (
-	"errors"
+	"flag"
 	"fmt"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -23,156 +21,47 @@ type Config struct {
 	DumpGroupID int64
 }
 
-func loadConfig(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+// envName maps a flag name to its env var: vote-ttl -> TGADMIN_VOTE_TTL
+func envName(flag string) string {
+	return "TGADMIN_" + strings.ToUpper(strings.ReplaceAll(flag, "-", "_"))
+}
+
+// loadConfig reads settings from env vars, then from command-line flags,
+// so flags win over env vars, and env vars win over defaults
+func loadConfig(args []string, getenv func(string) string) (*Config, error) {
+	c := &Config{}
+	fs := flag.NewFlagSet("tgadmin", flag.ContinueOnError)
+	fs.StringVar(&c.Token, "token", "", "Telegram bot token, required")
+	fs.BoolVar(&c.Dev, "dev", false, "dev mode: only log bans and whitelisting, treat @nikitonsky as unknown")
+	fs.IntVar(&c.VoteLimit, "vote-limit", 3, "votes on either side that decide the outcome")
+	fs.DurationVar(&c.VoteTTL, "vote-ttl", 24*time.Hour, "how long a vote stays open")
+	fs.IntVar(&c.RepeatedMessagesLimit, "repeated-messages-limit", 3, "same message posted this many times bans the user")
+	fs.DurationVar(&c.AdminCacheTTL, "admin-cache-ttl", time.Hour, "how long chat admin lists are cached")
+	fs.StringVar(&c.JevAPIKey, "jev-api-key", "", "Jev API key, enables the Jev check")
+	fs.Float64Var(&c.JevThreshold, "jev-threshold", 0.7, "Jev spam probability that bans the user")
+	fs.Int64Var(&c.DumpGroupID, "dump-group-id", -5016389519, "private group to probe if messages still exist")
+
+	var err error
+	fs.VisitAll(func(f *flag.Flag) {
+		name := envName(f.Name)
+		f.Usage += " (env " + name + ")"
+		if val := getenv(name); val != "" && err == nil {
+			if e := fs.Set(f.Name, val); e != nil {
+				err = fmt.Errorf("%s=%q: %w", name, val, e)
+			}
+		}
+	})
 	if err != nil {
 		return nil, err
 	}
-	m, err := readEDN(string(data))
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", path, err)
+	if err := fs.Parse(args); err != nil {
+		return nil, err
 	}
-
-	c := &Config{
-		VoteLimit:             3,
-		VoteTTL:               24 * time.Hour,
-		RepeatedMessagesLimit: 3,
-		AdminCacheTTL:         time.Hour,
-		JevThreshold:          0.7,
-		DumpGroupID:           -5016389519,
-	}
-	for key, val := range m {
-		if val == nil {
-			continue
-		}
-		// most settings are numbers, the rest overwrite ok
-		num, ok := val.(float64)
-		switch key {
-		case "dev?":
-			c.Dev, ok = val.(bool)
-		case "token":
-			c.Token, ok = val.(string)
-		case "jev-api-key":
-			c.JevAPIKey, ok = val.(string)
-		case "vote-limit":
-			c.VoteLimit = int(num)
-		case "repeated-messages-limit":
-			c.RepeatedMessagesLimit = int(num)
-		case "vote-ttl":
-			c.VoteTTL = time.Duration(num) * time.Millisecond
-		case "admin-cache-ttl":
-			c.AdminCacheTTL = time.Duration(num) * time.Millisecond
-		case "jev-threshold":
-			c.JevThreshold = num
-		case "dump-group-id":
-			c.DumpGroupID = int64(num)
-		default:
-			// unknown keys are ignored
-			ok = true
-		}
-		if !ok {
-			return nil, fmt.Errorf("%s: unexpected value for :%s: %v", path, key, val)
-		}
+	if fs.NArg() > 0 {
+		return nil, fmt.Errorf("unexpected arguments: %q", fs.Args())
 	}
 	if c.Token == "" {
-		return nil, fmt.Errorf("%s: :token is required", path)
+		return nil, fmt.Errorf("-token or %s is required", envName("token"))
 	}
 	return c, nil
-}
-
-// readEDN reads a flat EDN map of keywords to strings, numbers, booleans
-// and nil, which is all config.edn ever contains. Keys lose their colon
-func readEDN(src string) (map[string]any, error) {
-	r := &ednReader{src: src}
-	r.skip()
-	if !r.eat('{') {
-		return nil, errors.New("expected a map")
-	}
-	m := map[string]any{}
-	for {
-		r.skip()
-		if r.eat('}') {
-			return m, nil
-		}
-		key := r.token()
-		if !strings.HasPrefix(key, ":") {
-			return nil, fmt.Errorf("expected a keyword, got %q", key)
-		}
-		r.skip()
-		val, err := r.value()
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", key, err)
-		}
-		m[key[1:]] = val
-	}
-}
-
-type ednReader struct {
-	src string
-	pos int
-}
-
-func (r *ednReader) eat(c byte) bool {
-	if r.pos < len(r.src) && r.src[r.pos] == c {
-		r.pos++
-		return true
-	}
-	return false
-}
-
-// skip advances past whitespace, commas and comments
-func (r *ednReader) skip() {
-	for r.pos < len(r.src) {
-		switch r.src[r.pos] {
-		case ';':
-			for r.pos < len(r.src) && r.src[r.pos] != '\n' {
-				r.pos++
-			}
-		case ' ', '\t', '\r', '\n', ',':
-			r.pos++
-		default:
-			return
-		}
-	}
-}
-
-// token reads up to the next delimiter
-func (r *ednReader) token() string {
-	start := r.pos
-	for r.pos < len(r.src) && !strings.ContainsRune(" \t\r\n,;{}\"", rune(r.src[r.pos])) {
-		r.pos++
-	}
-	return r.src[start:r.pos]
-}
-
-func (r *ednReader) value() (any, error) {
-	if r.pos < len(r.src) && r.src[r.pos] == '"' {
-		end := r.pos + 1
-		for end < len(r.src) && r.src[end] != '"' {
-			if r.src[end] == '\\' {
-				end++
-			}
-			end++
-		}
-		if end >= len(r.src) {
-			return nil, errors.New("unterminated string")
-		}
-		s, err := strconv.Unquote(r.src[r.pos : end+1])
-		r.pos = end + 1
-		return s, err
-	}
-	switch tok := r.token(); tok {
-	case "true":
-		return true, nil
-	case "false":
-		return false, nil
-	case "nil":
-		return nil, nil
-	default:
-		n, err := strconv.ParseFloat(tok, 64)
-		if err != nil {
-			return nil, fmt.Errorf("unsupported value %q", tok)
-		}
-		return n, nil
-	}
 }

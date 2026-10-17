@@ -115,9 +115,8 @@ func setup(t *testing.T) *fake {
 	telegramURL, lolsURL, jevURL = server.URL, server.URL+"/lols", server.URL+"/jev"
 
 	t.Chdir(t.TempDir())
-	os.WriteFile("config.edn", []byte(`{:token "token" :dump-group-id -1}`), 0o644)
 	var err error
-	if config, err = loadConfig("config.edn"); err != nil {
+	if config, err = loadConfig([]string{"-token", "token", "-dump-group-id", "-1"}, noEnv); err != nil {
 		t.Fatal(err)
 	}
 	knownUsers = map[int64]bool{}
@@ -341,25 +340,25 @@ func TestPoll(t *testing.T) {
 	f.expect(t, "getUpdates 558841696 50 [message callback_query]")
 }
 
-func TestLoadConfig(t *testing.T) {
-	t.Chdir(t.TempDir())
-	load := func(edn string) (*Config, error) {
-		os.WriteFile("config.edn", []byte(edn), 0o644)
-		return loadConfig("config.edn")
-	}
+func noEnv(string) string { return "" }
 
-	config, err := load(`{:token "123:ab\"c" ;; @some_bot
- :dump-group-id -5016389519, ;; Dump {Chat}
- :jev-api-key nil
- :jev-threshold 0.5
- :vote-ttl 60000
- :reaction-channel-id -1
- :dev?  true}
-`)
+func TestLoadConfig(t *testing.T) {
+	env := map[string]string{
+		"TGADMIN_TOKEN":         "123:abc",
+		"TGADMIN_DEV":           "true",
+		"TGADMIN_VOTE_TTL":      "1m",
+		"TGADMIN_JEV_THRESHOLD": "0.5",
+		"TGADMIN_VOTE_LIMIT":    "5",
+		"OTHER":                 "ignored",
+	}
+	getenv := func(name string) string { return env[name] }
+
+	// flags win over env vars, env vars win over defaults
+	config, err := loadConfig([]string{"-vote-limit", "2", "-token=456:def"}, getenv)
 	want := &Config{
 		Dev:                   true,
-		Token:                 `123:ab"c`,
-		VoteLimit:             3,
+		Token:                 "456:def",
+		VoteLimit:             2,
 		VoteTTL:               time.Minute,
 		RepeatedMessagesLimit: 3,
 		AdminCacheTTL:         time.Hour,
@@ -370,20 +369,24 @@ func TestLoadConfig(t *testing.T) {
 		t.Errorf("config:\n got %+v, %v\nwant %+v", config, err, want)
 	}
 
-	for _, edn := range []string{
-		``,
-		`{}`,
-		`{:dev? true}`,
-		`{:token "abc"`,
-		`{:token "abc}`,
-		`{:token abc}`,
-		`{:token "abc" :vote-limit "3"}`,
-		`{:token "abc" :dev? 1}`,
-		`{"token" "abc"}`,
-		`[:token "abc"]`,
+	for _, tc := range []struct {
+		args []string
+		env  map[string]string
+	}{
+		{nil, nil},
+		{[]string{"-dev"}, nil},
+		{[]string{"-token", ""}, nil},
+		{nil, map[string]string{"TGADMIN_DEV": "true"}},
+		{[]string{"-token", "abc", "-vote-limit", "three"}, nil},
+		{[]string{"-token", "abc", "-vote-ttl", "60000"}, nil},
+		{[]string{"-token", "abc", "-unknown", "1"}, nil},
+		{[]string{"-token", "abc", "extra"}, nil},
+		{[]string{"-token", "abc"}, map[string]string{"TGADMIN_DEV": "yes"}},
+		{[]string{"-token", "abc"}, map[string]string{"TGADMIN_DUMP_GROUP_ID": "group"}},
 	} {
-		if config, err := load(edn); err == nil {
-			t.Errorf("%s: expected an error, got %+v", edn, config)
+		getenv := func(name string) string { return tc.env[name] }
+		if config, err := loadConfig(tc.args, getenv); err == nil {
+			t.Errorf("%q %v: expected an error, got %+v", tc.args, tc.env, config)
 		}
 	}
 }
