@@ -589,6 +589,9 @@ func poll(offset int64) int64 {
 func Main() {
 	var err error
 	if config, err = loadConfig(os.Args[1:], os.Getenv); err == nil {
+		err = os.MkdirAll(config.DataDir, 0o755)
+	}
+	if err == nil {
 		knownUsers, err = loadKnownUsers(knownUsersPath())
 	}
 	if errors.Is(err, flag.ErrHelp) {
