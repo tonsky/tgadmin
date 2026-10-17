@@ -1,4 +1,4 @@
-package main
+package tgadmin
 
 import (
 	"flag"
@@ -19,10 +19,16 @@ type Config struct {
 	JevThreshold float64
 	// private group used to probe if messages still exist, bot must be a member
 	DumpGroupID int64
+	// where known_users lives
+	DataDir string
 }
 
-// envName maps a flag name to its env var: vote-ttl -> TGADMIN_VOTE_TTL
+// envName maps a flag name to its env var: vote-ttl -> TGADMIN_VOTE_TTL.
+// DATA_DIR is set by Houston, so it has no prefix
 func envName(flag string) string {
+	if flag == "data-dir" {
+		return "DATA_DIR"
+	}
 	return "TGADMIN_" + strings.ToUpper(strings.ReplaceAll(flag, "-", "_"))
 }
 
@@ -40,6 +46,7 @@ func loadConfig(args []string, getenv func(string) string) (*Config, error) {
 	fs.StringVar(&c.JevAPIKey, "jev-api-key", "", "Jev API key, enables the Jev check")
 	fs.Float64Var(&c.JevThreshold, "jev-threshold", 0.7, "Jev spam probability that bans the user")
 	fs.Int64Var(&c.DumpGroupID, "dump-group-id", -5016389519, "private group to probe if messages still exist")
+	fs.StringVar(&c.DataDir, "data-dir", ".", "directory for known_users")
 
 	var err error
 	fs.VisitAll(func(f *flag.Flag) {

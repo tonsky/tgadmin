@@ -10,7 +10,7 @@ It only uses the standard library, there are no dependencies.
 
 ## Key Commands
 
-- **Run the bot**: `./script/run.sh` or `go run .`
+- **Run the bot**: `./script/run.sh` or `go run ./cmd/tgadmin` (flags are passed through)
 - **Run tests**: `./script/test.sh` (`go vet` + `go test -race`)
 - **Build binary**: `./script/package.sh` (creates `target/tgadmin`)
 
@@ -20,24 +20,26 @@ Pushing to `main` builds a linux/amd64 binary, copies it to the server and resta
 
 ### Core Components
 
-1. **Code** (single `main` package in the repo root):
-   - `main.go` — all bot logic:
-     - Long-polling loop over Telegram `getUpdates` (`main`, `poll`)
+1. **Code** (standard Go layout):
+   - `cmd/tgadmin/main.go` — the `main` package, just calls `tgadmin.Main`
+   - `internal/tgadmin/` — everything else, one package:
+   - `bot.go` — all bot logic:
+     - Long-polling loop over Telegram `getUpdates` (`Main`, `poll`)
      - Community vote system for first-time posters
      - External spam-database checks (lols.bot)
      - Jev (TypeSafe) spam classification of first messages
      - User management (whitelisting, banning)
    - `telegram.go` — Bot API types (only the fields the bot uses) and the HTTP wrapper
    - `config.go` — config loading from env vars and command-line flags (stdlib `flag`)
-   - `main_test.go` — tests that run the handlers against a fake Telegram/lols.bot/Jev server
+   - `bot_test.go` — tests that run the handlers against a fake Telegram/lols.bot/Jev server
 
 2. **Configuration**:
-   - Settings come from command-line flags and `TGADMIN_*` env vars; a flag wins over its env var, which wins over the default. Each flag `-some-name` has env var `TGADMIN_SOME_NAME`: `-token` (required), `-dev`, `-vote-limit` (default 3), `-vote-ttl` (Go duration, default `24h`), `-repeated-messages-limit` (default 3), `-admin-cache-ttl` (Go duration, default `1h`), `-dump-group-id`, `-jev-api-key` (optional, enables the Jev check), `-jev-threshold` (default 0.7). `tgadmin -h` lists them
+   - Settings come from command-line flags and `TGADMIN_*` env vars; a flag wins over its env var, which wins over the default. Each flag `-some-name` has env var `TGADMIN_SOME_NAME`: `-token` (required), `-dev`, `-vote-limit` (default 3), `-vote-ttl` (Go duration, default `24h`), `-repeated-messages-limit` (default 3), `-admin-cache-ttl` (Go duration, default `1h`), `-dump-group-id`, `-jev-api-key` (optional, enables the Jev check), `-jev-threshold` (default 0.7), and `-data-dir` (default `.`), whose env var is `DATA_DIR` without the prefix, because Houston sets it. `tgadmin -h` lists them
    - `mise.local.toml` — local env vars for development (token, keys, `TGADMIN_DEV`), gitignored
-   - `known_users` — persistent append-only storage of whitelisted user IDs
-   - `jev_prompt.txt` — the Jev prompt, embedded into the binary
+   - `known_users` in the data dir — persistent append-only storage of whitelisted user IDs
+   - `internal/tgadmin/jev_prompt.txt` — the Jev prompt, embedded into the binary
 
-3. **State Management** (package-level variables in `main.go`):
+3. **State Management** (package-level variables in `bot.go`):
    - `knownUsers` — whitelisted user IDs
    - `pendingVotes` — open votes by user ID: `messages`, `voteMessage`, `approve`/`ban` voter sets, `added`
    - `adminCache` — cached chat admin lists

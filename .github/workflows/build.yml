@@ -7,7 +7,7 @@ on:
     paths:
       - '**.go'
       - go.mod
-      - jev_prompt.txt
+      - internal/tgadmin/jev_prompt.txt
       - .github/workflows/build.yml
       - script/package.sh
       - script/test.sh

@@ -1,4 +1,4 @@
-package main
+package tgadmin
 
 import (
 	"bufio"
@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -209,6 +210,10 @@ func checkJev(msg *Message) string {
 	return ""
 }
 
+func knownUsersPath() string {
+	return filepath.Join(config.DataDir, "known_users")
+}
+
 func loadKnownUsers(path string) (map[int64]bool, error) {
 	users := map[int64]bool{}
 	f, err := os.Open(path)
@@ -236,7 +241,7 @@ func whitelistUser(user *User) {
 		return
 	}
 	knownUsers[user.ID] = true
-	f, err := os.OpenFile("known_users", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(knownUsersPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err == nil {
 		_, err = f.WriteString(userStr(user) + "\n")
 		err = errors.Join(err, f.Close())
@@ -581,10 +586,10 @@ func poll(offset int64) int64 {
 	return offset
 }
 
-func main() {
+func Main() {
 	var err error
 	if config, err = loadConfig(os.Args[1:], os.Getenv); err == nil {
-		knownUsers, err = loadKnownUsers("known_users")
+		knownUsers, err = loadKnownUsers(knownUsersPath())
 	}
 	if errors.Is(err, flag.ErrHelp) {
 		os.Exit(0)

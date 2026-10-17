@@ -1,4 +1,4 @@
-package main
+package tgadmin
 
 import (
 	"encoding/json"
@@ -116,7 +116,7 @@ func setup(t *testing.T) *fake {
 
 	t.Chdir(t.TempDir())
 	var err error
-	if config, err = loadConfig([]string{"-token", "token", "-dump-group-id", "-1"}, noEnv); err != nil {
+	if config, err = loadConfig([]string{"-token", "token", "-dump-group-id", "-1", "-data-dir", t.TempDir()}, noEnv); err != nil {
 		t.Fatal(err)
 	}
 	knownUsers = map[int64]bool{}
@@ -214,7 +214,7 @@ func TestApprove(t *testing.T) {
 	handleCallbackQuery(vote("approve", 13, 5))
 	f.expect(t, "answer", "delete -100/1000")
 
-	if data, _ := os.ReadFile("known_users"); string(data) != "5 User\n" {
+	if data, _ := os.ReadFile(knownUsersPath()); string(data) != "5 User\n" {
 		t.Errorf("known_users: %q", data)
 	}
 
@@ -307,7 +307,7 @@ func TestDevMode(t *testing.T) {
 
 	handleCallbackQuery(vote("approve", adminID, 5))
 	f.expect(t, "answer", "getChatAdministrators", "delete -100/1000")
-	if _, err := os.Stat("known_users"); err == nil {
+	if _, err := os.Stat(knownUsersPath()); err == nil {
 		t.Error("known_users written in dev mode")
 	}
 
@@ -330,7 +330,7 @@ func TestPoll(t *testing.T) {
 	f.expect(t, "getUpdates 0 50 [message callback_query]",
 		"send Голосуем! Nikita Prokopov — бот или нет?",
 		"answer", "getChatAdministrators", "delete -100/1000")
-	if data, _ := os.ReadFile("known_users"); string(data) != "232806939 @nikitonsky Nikita Prokopov\n" {
+	if data, _ := os.ReadFile(knownUsersPath()); string(data) != "232806939 @nikitonsky Nikita Prokopov\n" {
 		t.Errorf("known_users: %q", data)
 	}
 
@@ -349,6 +349,7 @@ func TestLoadConfig(t *testing.T) {
 		"TGADMIN_VOTE_TTL":      "1m",
 		"TGADMIN_JEV_THRESHOLD": "0.5",
 		"TGADMIN_VOTE_LIMIT":    "5",
+		"DATA_DIR":              "/data",
 		"OTHER":                 "ignored",
 	}
 	getenv := func(name string) string { return env[name] }
@@ -364,9 +365,19 @@ func TestLoadConfig(t *testing.T) {
 		AdminCacheTTL:         time.Hour,
 		JevThreshold:          0.5,
 		DumpGroupID:           -5016389519,
+		DataDir:               "/data",
 	}
 	if err != nil || !reflect.DeepEqual(config, want) {
 		t.Errorf("config:\n got %+v, %v\nwant %+v", config, err, want)
+	}
+
+	config, err = loadConfig([]string{"-data-dir", "/other"}, getenv)
+	if err != nil || config.DataDir != "/other" {
+		t.Errorf("-data-dir: %+v, %v", config, err)
+	}
+	config, err = loadConfig([]string{"-token", "abc"}, noEnv)
+	if err != nil || config.DataDir != "." {
+		t.Errorf("default data dir: %+v, %v", config, err)
 	}
 
 	for _, tc := range []struct {
