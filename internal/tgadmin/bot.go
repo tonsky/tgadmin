@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -285,6 +286,7 @@ func appendLine(path string, line []byte) error {
 const (
 	lolsSpamFile = "lols_spam.jsonl"
 	jevSpamFile  = "jev_spam.jsonl"
+	jevTrustFile = "jev_trusted.jsonl"
 	voteSpamFile = "vote_spam.jsonl"
 	notSpamFile  = "not_spam.jsonl"
 )
@@ -546,8 +548,29 @@ func handleMessage(msg *Message) {
 		return
 	}
 
+	// trusted by jev: an old account writing something Jev is sure is not spam
+	if jev != nil && *jev < config.JevTrustThreshold && trusted(msg) {
+		fmt.Println("[ TRUSTED ]", messageStr(msg))
+		whitelistUser(user)
+		record(jevTrustFile, []*Message{msg})
+		return
+	}
+
 	// start community vote
 	startVote(msg)
+}
+
+// trusted tells if msg can skip the vote when Jev is sure it’s not spam.
+// Spam comes mostly from new accounts, and Telegram IDs grow with account
+// age. Short messages give Jev too little to judge
+func trusted(msg *Message) bool {
+	letters := 0
+	for _, r := range msg.Text + msg.Caption {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			letters++
+		}
+	}
+	return msg.From.ID < config.TrustMaxUserID && letters >= 10
 }
 
 // checkPendingVotes re-checks every user with an open vote: bans if lols.bot

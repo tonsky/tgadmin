@@ -17,6 +17,9 @@ type Config struct {
 	// https://docs.typesafe.ai, skipped if not set
 	JevAPIKey    string
 	JevThreshold float64
+	// first messages Jev is sure about from accounts older than this skip the vote
+	JevTrustThreshold float64
+	TrustMaxUserID    int64
 	// private group used to probe if messages still exist, bot must be a member
 	DumpGroupID int64
 	// where known_users lives
@@ -45,6 +48,8 @@ func loadConfig(args []string, getenv func(string) string) (*Config, error) {
 	fs.DurationVar(&c.AdminCacheTTL, "admin-cache-ttl", time.Hour, "how long chat admin lists are cached")
 	fs.StringVar(&c.JevAPIKey, "jev-api-key", "", "Jev API key, enables the Jev check")
 	fs.Float64Var(&c.JevThreshold, "jev-threshold", 0.6, "Jev spam probability that bans the user")
+	fs.Float64Var(&c.JevTrustThreshold, "jev-trust-threshold", 0.05, "Jev spam probability below which the user is whitelisted without a vote")
+	fs.Int64Var(&c.TrustMaxUserID, "trust-max-user-id", 5_000_000_000, "only users with lower IDs (older accounts) can skip the vote")
 	fs.Int64Var(&c.DumpGroupID, "dump-group-id", -5016389519, "private group to probe if messages still exist")
 	fs.StringVar(&c.DataDir, "data-dir", ".", "directory for known_users")
 

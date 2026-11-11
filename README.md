@@ -6,6 +6,7 @@ User posting for the first time in a group is checked:
 
 1. With https://lols.bot database
 2. With [Jev](https://docs.typesafe.ai)
+   - If Jev is sure it’s not spam, the account is old and the message isn’t too short, the user is whitelisted without a vote
 3. With a vote: “🤖 Бот / 🧑 Не бот”:
    - Three votes on either side decide the outcome
    - A single admin vote decides immediately

@@ -220,6 +220,35 @@ func TestJev(t *testing.T) {
 	f.expect(t, voteText)
 }
 
+func TestJevTrust(t *testing.T) {
+	f := setup(t)
+	config.JevAPIKey = "key"
+	text := "a perfectly normal comment"
+
+	f.noul = 0.04
+	handleMessage(message(10, 5, text))
+	f.expect(t)
+	if !knownUsers[5] {
+		t.Error("user 5 not whitelisted")
+	}
+	expectRecords(t, jevTrustFile, text)
+
+	// not sure enough
+	f.noul = 0.05
+	handleMessage(message(11, 6, text))
+	f.expect(t, voteText)
+
+	// too short
+	f.noul = 0.04
+	handleMessage(message(12, 7, "ok 👍"))
+	f.expect(t, voteText)
+
+	// new account
+	handleMessage(message(13, 8_000_000_000, text))
+	f.expect(t, voteText)
+	expectRecords(t, jevTrustFile, text)
+}
+
 func TestApprove(t *testing.T) {
 	f := setup(t)
 	handleMessage(message(10, 5, "hi"))
@@ -407,6 +436,8 @@ func TestLoadConfig(t *testing.T) {
 		RepeatedMessagesLimit: 3,
 		AdminCacheTTL:         time.Hour,
 		JevThreshold:          0.5,
+		JevTrustThreshold:     0.05,
+		TrustMaxUserID:        5_000_000_000,
 		DumpGroupID:           -5016389519,
 		DataDir:               "/data",
 	}
