@@ -93,10 +93,10 @@ func messageStr(msg *Message) string {
 
 // app
 
-var lolsURL = "https://lols.bot"
+var lolsURL = "https://api.lols.bot"
 
 func checkExternal(userID int64) string {
-	status, data, err := request(fmt.Sprintf("%s/?a=%d", lolsURL, userID), nil, nil, 10*time.Second)
+	status, data, err := request(fmt.Sprintf("%s/account?id=%d", lolsURL, userID), nil, nil, 10*time.Second)
 	if err != nil {
 		fmt.Println("[ ERROR ] lols.bot", err)
 		return ""

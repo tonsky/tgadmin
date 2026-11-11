@@ -69,8 +69,8 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch r.URL.Path {
-	case "/lols/":
-		id, _ := strconv.ParseInt(r.URL.Query().Get("a"), 10, 64)
+	case "/lols/account":
+		id, _ := strconv.ParseInt(r.URL.Query().Get("id"), 10, 64)
 		fmt.Fprintf(w, `{"banned":%v}`, f.spammers[id])
 		return
 	case "/jev":
