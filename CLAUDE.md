@@ -6,13 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is a Telegram moderation bot written in Go that detects and bans spam accounts in Telegram groups. New users are checked against an external spam database and (optionally) the Jev spam classifier, and their first message triggers a community vote ("bot or not?") that decides whether to whitelist or ban them.
 
-It only uses the standard library, there are no dependencies.
+Besides the standard library it has one dependency: `modernc.org/sqlite`, a pure-Go SQLite (no cgo, so `go build` works anywhere).
 
 ## Key Commands
 
 - **Run the bot**: `./script/run.sh` or `go run ./cmd/tgadmin` (flags are passed through)
 - **Run tests**: `./script/test.sh` (`go vet` + `go test -race`)
 - **Build binary**: `./script/package.sh` (creates `target/tgadmin`)
+- **Dump the database**: `tgadmin dump [-data-dir dir]` lists tables, `tgadmin dump [-data-dir dir] <table>` prints one as JSON lines (`raw` messages as JSON). Reads in small batches, safe to run next to the live bot. On the server: `cd ~/tgadmin && current/tgadmin dump -data-dir data messages`; `sqlite3 data/tgadmin.sqlite` works too
 
 Pushing to `main` runs the tests and a linux/amd64 build in CI (`.github/workflows/build.yml`). Deploys are done by Houston, which builds on the server with `go build -o tgadmin ./cmd/tgadmin`.
 
@@ -30,22 +31,27 @@ Pushing to `main` runs the tests and a linux/amd64 build in CI (`.github/workflo
      - Jev (TypeSafe) spam classification of first messages
      - User management (whitelisting, banning)
    - `telegram.go` — Bot API types (only the fields the bot uses) and the HTTP wrapper
+   - `db.go` — SQLite storage: schema, migrations, reads/writes, `tgadmin dump`
    - `config.go` — config loading from env vars and command-line flags (stdlib `flag`)
    - `bot_test.go` — tests that run the handlers against a fake Telegram/lols.bot/Jev server
 
 2. **Configuration**:
    - Settings come from command-line flags and `TGADMIN_*` env vars; a flag wins over its env var, which wins over the default. Each flag `-some-name` has env var `TGADMIN_SOME_NAME`: `-token` (required), `-dev`, `-vote-limit` (default 3), `-vote-ttl` (Go duration, default `24h`), `-repeated-messages-limit` (default 3), `-admin-cache-ttl` (Go duration, default `1h`), `-dump-group-id`, `-jev-api-key` (optional, enables the Jev check), `-jev-threshold` (default 0.6), `-jev-trust-threshold` (default 0.05), `-trust-max-user-id` (default 5000000000), and `-data-dir` (default `.`), whose env var is `DATA_DIR` without the prefix, because Houston sets it. `tgadmin -h` lists them
    - `mise.local.toml` — local env vars for development (token, keys, `TGADMIN_DEV`), gitignored
-   - `known_users` in the data dir — persistent append-only storage of whitelisted user IDs
-   - `lols_spam.jsonl`, `jev_spam.jsonl`, `jev_trusted.jsonl` (whitelisted by Jev without a vote), `vote_spam.jsonl` (vote bans and repeated messages), `not_spam.jsonl` (whitelisted after a vote) in the data dir — the checked messages by outcome, one message per line, exactly as Telegram sent it (a ban or whitelist after a vote writes all of the user's collected messages). Written in dev mode too. Meant for tuning the Jev prompt
+   - `tgadmin.sqlite` in the data dir — SQLite database with everything the bot remembers, see State below. Default rollback journal (no WAL), `synchronous=FULL`, one connection per process
+   - `known_users`, `*.jsonl` in the data dir — what the bot kept before the database; imported by the first migration and left in place, no longer written
    - `internal/tgadmin/jev_prompt.txt` — the Jev prompt, embedded into the binary
 
-3. **State Management** (package-level variables in `bot.go`):
-   - `knownUsers` — whitelisted user IDs
-   - `pendingVotes` — open votes by user ID: `messages`, `voteMessage`, `approve`/`ban` voter sets, `added`
-   - `adminCache` — cached chat admin lists
+3. **State** — tables in `tgadmin.sqlite`, schema in `db.go`:
+   - `users` — everyone the checks have seen: `status` (`unknown`, `known` = whitelisted, `banned`), `reason`, `since`, display `username` and `name`
+   - `messages` — every checked message, `raw` exactly as Telegram sent it, Jev's `jev` score if asked, and `outcome` (`lols_spam`, `jev_spam`, `jev_trusted`, `vote_spam`, `not_spam`, `retracted`, `expired`; NULL while the user's vote is open). Written in dev mode too. Meant for tuning the Jev prompt
+   - `votes` (open votes) and `ballots` (who voted which side) — votes survive restarts
 
-   Two goroutines run: the update loop and the timers (`runTimers`). `pendingVotes` is the only state they share and is guarded by `votesMu`; the mutex is never held across network calls. `knownUsers` and `adminCache` are only touched by the update loop.
+   Migrations: `migrations` in `db.go`, one function per schema version, tracked in `PRAGMA user_version`; never edit one that has shipped, append a new one.
+
+   In memory: `knownUsers` (cache of known user IDs, loaded at start) and `adminCache` (chat admin lists), both only touched by the update loop.
+
+   Two goroutines run: the update loop and the timers (`runTimers`). They share only the database; `db` has a single connection, so all access is serialized and transactions (`inTx`) make each change atomic. Never call `db.*` while holding a transaction or open rows (it would deadlock), and never hold a transaction across network calls.
 
 ### Bot Algorithm
 
@@ -72,15 +78,16 @@ Note: the Bot API sends no update when messages are deleted, so deletion is dete
 - `checkJev` — asks Jev whether a first message is spam (only text/caption, hidden link URLs, the forward source, sender name/username and the replied-to message are sent)
 - `trusted` — whether a message Jev is sure about can skip the vote (old account, enough text)
 - `startVote` — posts the vote message for a first-time poster
-- `resolveVote` — atomically removes a pending vote and deletes the vote message; every vote outcome goes through it
+- `closeVote` — atomically ends a vote and sets its messages' outcome; whoever gets the vote back acts on it. `resolveVote` also deletes the vote message; every vote outcome goes through one of them
 - `checkPendingVotes` — the per-minute re-check (lols.bot + deleted-messages probe)
 - `banUser` — deletes user's messages and bans them
-- `whitelistUser` — adds user to `known_users` file
+- `whitelistUser` — marks user known (`setStatus`)
+- `record` — stores checked messages with their outcome
 - `post` — Telegram API call wrapper (decodes the result, returns false on error)
 
 ### Dev Mode
 
-With `-dev` (or `TGADMIN_DEV=true`), the actual ban call and `known_users` writes are skipped (logged only; message deletion still happens), and messages from `nikitonsky` are treated as coming from an unknown user for testing.
+With `-dev` (or `TGADMIN_DEV=true`), the actual ban call and user status changes are skipped (logged only; message deletion and recording messages still happen), and messages from `nikitonsky` are treated as coming from an unknown user for testing.
 
 ### Logging
 

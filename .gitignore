@@ -16,3 +16,5 @@ mise.local.toml
 known_users
 /data
 /tgadmin
+tgadmin.sqlite
+tgadmin.sqlite-journal

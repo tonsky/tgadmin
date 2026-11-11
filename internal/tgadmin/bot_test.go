@@ -1,6 +1,8 @@
 package tgadmin
 
 import (
+	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -121,8 +123,10 @@ func setup(t *testing.T) *fake {
 	if config, err = loadConfig([]string{"-token", "token", "-dump-group-id", "-1", "-data-dir", t.TempDir()}, noEnv); err != nil {
 		t.Fatal(err)
 	}
-	knownUsers = map[int64]bool{}
-	pendingVotes = map[int64]*pendingVote{}
+	if err := start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
 	adminCache = map[int64]adminList{}
 	return f
 }
@@ -147,23 +151,48 @@ func vote(action string, voterID, targetID int64) *CallbackQuery {
 
 const voteText = "send Голосуем! User — бот или нет?"
 
-// expectRecords checks message texts in file, one message per line
-func expectRecords(t *testing.T, file string, want ...string) {
+// expectRecords checks texts of the recorded messages with outcome
+func expectRecords(t *testing.T, outcome string, want ...string) {
 	t.Helper()
-	data, _ := os.ReadFile(filepath.Join(config.DataDir, file))
+	rows, err := db.Query("SELECT raw FROM messages WHERE outcome = ? ORDER BY rowid", outcome)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
 	got := []string{}
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if line == "" {
-			continue
-		}
+	for rows.Next() {
+		var raw string
+		rows.Scan(&raw)
 		var msg Message
-		if err := json.Unmarshal([]byte(line), &msg); err != nil || msg.MessageID == 0 {
-			t.Fatalf("%s: not a message: %s, %v", file, line, err)
+		if err := json.Unmarshal([]byte(raw), &msg); err != nil || msg.MessageID == 0 {
+			t.Fatalf("%s: not a message: %s, %v", outcome, raw, err)
 		}
 		got = append(got, msg.Text)
 	}
 	if !slices.Equal(got, append([]string{}, want...)) {
-		t.Errorf("%s:\n got %q\nwant %q", file, got, want)
+		t.Errorf("%s:\n got %q\nwant %q", outcome, got, want)
+	}
+}
+
+// expectUser checks user’s status and reason, "" if there’s no such user
+func expectUser(t *testing.T, id int64, want string) {
+	t.Helper()
+	var status string
+	var reason sql.NullString
+	err := db.QueryRow("SELECT status, reason FROM users WHERE id = ?", id).Scan(&status, &reason)
+	if err != nil && err != sql.ErrNoRows {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(status + " " + reason.String); got != want {
+		t.Errorf("user %d: got %q, want %q", id, got, want)
+	}
+}
+
+func expectVotes(t *testing.T, want ...int64) {
+	t.Helper()
+	got, err := openVotes(time.Now())
+	if err != nil || !slices.Equal(got, append([]int64{}, want...)) {
+		t.Errorf("open votes: got %v, %v, want %v", got, err, want)
 	}
 }
 
@@ -180,10 +209,9 @@ func TestBannedAtLols(t *testing.T) {
 	f.spammers[5] = true
 	handleMessage(message(10, 5, "hi"))
 	f.expect(t, "delete -100/10", "ban 5")
-	if len(pendingVotes) != 0 {
-		t.Error("vote started for a banned user")
-	}
-	expectRecords(t, lolsSpamFile, "hi")
+	expectVotes(t)
+	expectRecords(t, outcomeLolsSpam, "hi")
+	expectUser(t, 5, "banned banned at lols.bot")
 }
 
 func TestJev(t *testing.T) {
@@ -213,7 +241,13 @@ func TestJev(t *testing.T) {
 		t.Errorf("jev state:\n got %v\nwant %v", f.jevState, want)
 	}
 
-	expectRecords(t, jevSpamFile, "hi")
+	expectRecords(t, outcomeJevSpam, "hi")
+	expectUser(t, 5, "banned spam by jev")
+	var jev float64
+	db.QueryRow("SELECT jev FROM messages WHERE message_id = 10").Scan(&jev)
+	if jev != 0.6 {
+		t.Errorf("jev: %v", jev)
+	}
 
 	f.noul = 0.59
 	handleMessage(message(11, 6, "hi"))
@@ -231,7 +265,8 @@ func TestJevTrust(t *testing.T) {
 	if !knownUsers[5] {
 		t.Error("user 5 not whitelisted")
 	}
-	expectRecords(t, jevTrustFile, text)
+	expectUser(t, 5, "known jev trusted")
+	expectRecords(t, outcomeJevTrusted, text)
 
 	// not sure enough
 	f.noul = 0.05
@@ -246,7 +281,7 @@ func TestJevTrust(t *testing.T) {
 	// new account
 	handleMessage(message(13, 8_000_000_000, text))
 	f.expect(t, voteText)
-	expectRecords(t, jevTrustFile, text)
+	expectRecords(t, outcomeJevTrusted, text)
 }
 
 func TestApprove(t *testing.T) {
@@ -272,10 +307,11 @@ func TestApprove(t *testing.T) {
 	handleCallbackQuery(vote("approve", 13, 5))
 	f.expect(t, "answer", "delete -100/1000")
 
-	if data, _ := os.ReadFile(knownUsersPath()); string(data) != "5 User\n" {
-		t.Errorf("known_users: %q", data)
+	if !knownUsers[5] {
+		t.Error("user 5 not whitelisted")
 	}
-	expectRecords(t, notSpamFile, "hi")
+	expectUser(t, 5, "known user vote")
+	expectRecords(t, outcomeNotSpam, "hi")
 
 	// late vote, garbage, and the user is known now
 	handleCallbackQuery(vote("ban", 14, 5))
@@ -293,10 +329,12 @@ func TestAdminBan(t *testing.T) {
 
 	handleCallbackQuery(vote("ban", adminID, 5))
 	f.expect(t, "answer", "getChatAdministrators", "delete -100/1000", "delete -100/10", "delete -100/11", "ban 5")
-	if knownUsers[5] || len(pendingVotes) != 0 {
-		t.Error("banned user is still around")
+	if knownUsers[5] {
+		t.Error("banned user is known")
 	}
-	expectRecords(t, voteSpamFile, "hi", "hi again")
+	expectVotes(t)
+	expectUser(t, 5, "banned admin vote")
+	expectRecords(t, outcomeVoteSpam, "hi", "hi again")
 }
 
 func TestRepeatedMessages(t *testing.T) {
@@ -313,7 +351,8 @@ func TestRepeatedMessages(t *testing.T) {
 	f.expect(t, "delete -100/1000",
 		"delete -100/10", "delete -100/11", "delete -100/12", "delete -100/13",
 		"delete -100/14", "delete -100/15", "delete -100/16", "ban 5")
-	expectRecords(t, voteSpamFile, "hi", "hi", "hi", "hi", "buy my stuff", "buy my stuff", "buy my stuff")
+	expectRecords(t, outcomeVoteSpam, "hi", "hi", "hi", "hi", "buy my stuff", "buy my stuff", "buy my stuff")
+	expectUser(t, 5, "banned repeated messages")
 }
 
 func TestCheckPendingVotes(t *testing.T) {
@@ -329,7 +368,7 @@ func TestCheckPendingVotes(t *testing.T) {
 	f.spammers[5] = true
 	checkPendingVotes()
 	f.expect(t, "delete -100/1000", "delete -100/10", "ban 5")
-	expectRecords(t, lolsSpamFile, "hi")
+	expectRecords(t, outcomeLolsSpam, "hi")
 
 	// user deleted one message, then all of them
 	handleMessage(message(20, 6, "hi"))
@@ -341,23 +380,42 @@ func TestCheckPendingVotes(t *testing.T) {
 	f.deleted[21] = true
 	checkPendingVotes()
 	f.expect(t, "forwardMessage", "forwardMessage", "delete -100/1000")
-	if knownUsers[6] || len(pendingVotes) != 0 {
-		t.Error("vote was not retracted")
+	if knownUsers[6] {
+		t.Error("retracted user is known")
 	}
-	expectRecords(t, notSpamFile)
-	expectRecords(t, voteSpamFile)
+	expectVotes(t)
+	expectUser(t, 6, "unknown")
+	expectRecords(t, outcomeRetracted, "hi", "hi again")
+	expectRecords(t, outcomeNotSpam)
+	expectRecords(t, outcomeVoteSpam)
 }
 
 func TestCleanupPendingVotes(t *testing.T) {
 	f := setup(t)
 	handleMessage(message(10, 5, "hi"))
 	handleMessage(message(20, 6, "hi"))
-	pendingVotes[5].added = time.Now().Add(-25 * time.Hour)
+	db.Exec("UPDATE votes SET started = ? WHERE user_id = 5", time.Now().Add(-25*time.Hour).UTC().Format(timeFormat))
 	cleanupPendingVotes()
 	f.expect(t, voteText, voteText)
-	if pendingVotes[5] != nil || pendingVotes[6] == nil {
-		t.Errorf("pending votes: %v", pendingVotes)
+	expectVotes(t, 6)
+	expectRecords(t, outcomeExpired, "hi")
+}
+
+func TestVotesSurviveRestart(t *testing.T) {
+	f := setup(t)
+	handleMessage(message(10, 5, "hi"))
+	handleCallbackQuery(vote("approve", 11, 5))
+	f.expect(t, voteText, "answer", "getChatAdministrators", "edit 🤖 Бот (0) / 🧑 Не бот (1)")
+
+	db.Close()
+	if err := start(); err != nil {
+		t.Fatal(err)
 	}
+	handleMessage(message(12, 5, "still here"))
+	handleCallbackQuery(vote("approve", 12, 5))
+	handleCallbackQuery(vote("approve", 13, 5))
+	f.expect(t, "answer", "edit 🤖 Бот (0) / 🧑 Не бот (2)", "answer", "delete -100/1000")
+	expectRecords(t, outcomeNotSpam, "hi", "still here")
 }
 
 func TestDevMode(t *testing.T) {
@@ -371,13 +429,15 @@ func TestDevMode(t *testing.T) {
 
 	handleCallbackQuery(vote("approve", adminID, 5))
 	f.expect(t, "answer", "getChatAdministrators", "delete -100/1000")
-	if _, err := os.Stat(knownUsersPath()); err == nil {
-		t.Error("known_users written in dev mode")
-	}
+	expectUser(t, 5, "unknown")
+	expectRecords(t, outcomeNotSpam, "hi")
 
+	msg = message(11, 5, "hi again")
+	msg.From.Username = "nikitonsky"
 	handleMessage(msg)
 	handleCallbackQuery(vote("ban", adminID, 5))
-	f.expect(t, voteText, "answer", "delete -100/1000", "delete -100/10")
+	f.expect(t, voteText, "answer", "delete -100/1000", "delete -100/11")
+	expectUser(t, 5, "unknown")
 }
 
 func TestPoll(t *testing.T) {
@@ -394,16 +454,23 @@ func TestPoll(t *testing.T) {
 	f.expect(t, "getUpdates 0 50 [message callback_query]",
 		"send Голосуем! Nikita Prokopov — бот или нет?",
 		"answer", "getChatAdministrators", "delete -100/1000")
-	if data, _ := os.ReadFile(knownUsersPath()); string(data) != "232806939 @nikitonsky Nikita Prokopov\n" {
-		t.Errorf("known_users: %q", data)
+	var username, name string
+	db.QueryRow("SELECT username, name FROM users WHERE id = 232806939").Scan(&username, &name)
+	if username != "nikitonsky" || name != "Nikita Prokopov" {
+		t.Errorf("user: %q %q", username, name)
 	}
+	expectUser(t, 232806939, "known admin vote")
 	// messages are recorded as Telegram sent them
-	expectRecords(t, notSpamFile, "reply")
-	data, _ := os.ReadFile(filepath.Join(config.DataDir, notSpamFile))
-	for _, want := range []string{`{"message_id":13,"from":{"id":232806939,`, `"title":"Grumpy <Queue>"`, `"message_thread_id":8`, `"entities":[{"offset":0,"length":5,"type":"bold"}]}` + "\n"} {
-		if !strings.Contains(string(data), want) {
-			t.Errorf("%s: no %s in %s", notSpamFile, want, data)
+	expectRecords(t, outcomeNotSpam, "reply")
+	var raw, date string
+	db.QueryRow("SELECT raw, date FROM messages").Scan(&raw, &date)
+	for _, want := range []string{`{"message_id":13,"from":{"id":232806939,`, `"title":"Grumpy <Queue>"`, `"message_thread_id":8`, `"entities":[{"offset":0,"length":5,"type":"bold"}]}`} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("no %s in %s", want, raw)
 		}
+	}
+	if date != "2023-11-02 13:54:32" {
+		t.Errorf("date: %s", date)
 	}
 
 	if offset = poll(offset); offset != 558841696 {
@@ -476,17 +543,85 @@ func TestLoadConfig(t *testing.T) {
 	}
 }
 
-func TestLoadKnownUsers(t *testing.T) {
-	t.Chdir(t.TempDir())
-	users, err := loadKnownUsers("known_users")
-	if err != nil || len(users) != 0 {
-		t.Errorf("missing file: %v, %v", users, err)
+func TestMigrate(t *testing.T) {
+	setup(t)
+	db.Close()
+
+	// files the bot kept before the database
+	config.DataDir = t.TempDir()
+	write := func(name, data string) {
+		os.WriteFile(filepath.Join(config.DataDir, name), []byte(data), 0o644)
+	}
+	write("known_users", "1 @first First Last\n-2\n\nnobody\n3 Third\n1 @first again\n4\n")
+	write("lols_spam.jsonl", `{"message_id":10,"from":{"id":5,"first_name":"Spammer"},"chat":{"id":-100,"username":"chat"},"date":1698933272,"text":"buy"}`+"\n")
+	write("not_spam.jsonl", `{"message_id":11,"from":{"id":4,"first_name":"Fourth"},"chat":{"id":-100},"date":1698933272,"text":"hi"}`+"\n"+
+		`{"message_id":12,"from":{"id":4,"first_name":"Fourth"},"chat":{"id":-100},"date":1698933272,"text":"hi again"}`+"\n")
+
+	if err := start(); err != nil {
+		t.Fatal(err)
+	}
+	if want := map[int64]bool{1: true, -2: true, 3: true, 4: true}; !reflect.DeepEqual(knownUsers, want) {
+		t.Errorf("known users: %v", knownUsers)
+	}
+	var username, name string
+	db.QueryRow("SELECT username, name FROM users WHERE id = 1").Scan(&username, &name)
+	if username != "first" || name != "First Last" {
+		t.Errorf("user 1: %q %q", username, name)
+	}
+	expectUser(t, 3, "known known_users")
+	expectUser(t, 4, "known vote")
+	expectUser(t, 5, "banned banned at lols.bot")
+	expectRecords(t, outcomeLolsSpam, "buy")
+	expectRecords(t, outcomeNotSpam, "hi", "hi again")
+
+	// migrations run once
+	db.Exec("DELETE FROM messages")
+	db.Close()
+	if err := start(); err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	db.QueryRow("PRAGMA user_version").Scan(&version)
+	if version != len(migrations) {
+		t.Errorf("version %d", version)
+	}
+	expectRecords(t, outcomeNotSpam)
+}
+
+func TestDump(t *testing.T) {
+	f := setup(t)
+	f.spammers[5] = true
+	msg := message(10, 5, "<buy> & sell")
+	msg.Date = 1698933272
+	msg.raw = []byte(`{"message_id": 10, "from": {"id": 5, "first_name": "User"}, "chat": {"id": -100, "username": "chat"}, "date": 1698933272, "text": "<buy> & sell"}`)
+	handleMessage(msg)
+	handleMessage(message(11, 6, "hi"))
+	db.Close()
+
+	dumpStr := func(args ...string) string {
+		t.Helper()
+		var out bytes.Buffer
+		if err := dump(args, func(name string) string { return map[string]string{"DATA_DIR": config.DataDir}[name] }, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	if got := dumpStr(); got != "users\nmessages\nvotes\nballots\n" {
+		t.Errorf("tables: %q", got)
+	}
+	lines := strings.Split(dumpStr("-data-dir", config.DataDir, "messages"), "\n")
+	if want := `{"chat_id":-100,"message_id":10,"user_id":5,"date":"2023-11-02 13:54:32","raw":{"message_id":10,"from":{"id":5,"first_name":"User"},"chat":{"id":-100,"username":"chat"},"date":1698933272,"text":"<buy> & sell"},"jev":null,"outcome":"lols_spam"}`; len(lines) != 3 || lines[0] != want || !strings.HasSuffix(lines[1], `"jev":null,"outcome":null}`) {
+		t.Errorf("messages:\n got %q\nwant %s", lines, want)
+	}
+	if got := dumpStr("votes"); !strings.HasPrefix(got, `{"user_id":6,"chat_id":-100,"vote_message_id":1000,"started":"`) {
+		t.Errorf("votes: %s", got)
 	}
 
-	os.WriteFile("known_users", []byte("1 @first First\n-2\n\nnobody\n3"), 0o644)
-	users, err = loadKnownUsers("known_users")
-	want := map[int64]bool{1: true, -2: true, 3: true}
-	if err != nil || !reflect.DeepEqual(users, want) {
-		t.Errorf("known users: %v, %v", users, err)
+	var out bytes.Buffer
+	if err := dump([]string{"nope"}, func(string) string { return config.DataDir }, &out); err == nil {
+		t.Error("dumped a missing table")
+	}
+	if err := dump([]string{"-data-dir", t.TempDir(), "users"}, noEnv, &out); err == nil {
+		t.Error("dumped a missing database")
 	}
 }

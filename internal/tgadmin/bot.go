@@ -1,21 +1,18 @@
 package tgadmin
 
 import (
-	"bufio"
 	"bytes"
+	"database/sql"
 	_ "embed"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io/fs"
 	"os"
-	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -23,25 +20,11 @@ import (
 
 var config *Config
 
-// state
+// state, besides the database (see db.go)
 
-// whitelisted user IDs, only touched by the update loop
+// whitelisted user IDs, a cache of known users in the database,
+// only touched by the update loop
 var knownUsers map[int64]bool
-
-type pendingVote struct {
-	messages    []*Message
-	voteMessage *Message       // nil if posting it failed
-	approve     map[int64]bool // voter IDs
-	ban         map[int64]bool
-	added       time.Time
-}
-
-// open votes by user ID, shared between the update loop and the timers.
-// A vote taken out of the map by resolveVote belongs to whoever took it
-var (
-	votesMu      sync.Mutex
-	pendingVotes = map[int64]*pendingVote{}
-)
 
 type adminList struct {
 	admins  map[int64]bool
@@ -236,73 +219,9 @@ func checkJev(msg *Message) *float64 {
 	return noul
 }
 
-func knownUsersPath() string {
-	return filepath.Join(config.DataDir, "known_users")
-}
-
-func loadKnownUsers(path string) (map[int64]bool, error) {
-	users := map[int64]bool{}
-	f, err := os.Open(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return users, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		// lines are user IDs optionally followed by names, see userStr
-		var id int64
-		if n, _ := fmt.Sscanf(scanner.Text(), "%d", &id); n == 1 {
-			users[id] = true
-		}
-	}
-	return users, scanner.Err()
-}
-
-func whitelistUser(user *User) {
-	fmt.Println("[ WHITELIST ]", userStr(user))
-	if config.Dev {
-		return
-	}
-	knownUsers[user.ID] = true
-	if err := appendLine(knownUsersPath(), []byte(userStr(user)+"\n")); err != nil {
-		fmt.Println("[ ERROR ]", err)
-	}
-}
-
-func appendLine(path string, line []byte) error {
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(line)
-	return errors.Join(err, f.Close())
-}
-
-// files in the data dir with checked messages by outcome, one message per line
-// as Telegram sent it, to tune the Jev prompt later
-const (
-	lolsSpamFile = "lols_spam.jsonl"
-	jevSpamFile  = "jev_spam.jsonl"
-	jevTrustFile = "jev_trusted.jsonl"
-	voteSpamFile = "vote_spam.jsonl"
-	notSpamFile  = "not_spam.jsonl"
-)
-
-func record(file string, messages []*Message) {
-	var buf bytes.Buffer
-	for _, msg := range messages {
-		if err := json.Compact(&buf, msg.rawJSON()); err != nil {
-			fmt.Println("[ ERROR ]", err)
-			return
-		}
-		buf.WriteByte('\n')
-	}
-	if err := appendLine(filepath.Join(config.DataDir, file), buf.Bytes()); err != nil {
-		fmt.Println("[ ERROR ]", err)
-	}
+func whitelistUser(user *User, reason string) {
+	fmt.Println("[ WHITELIST ]", userStr(user), "for", reason)
+	setStatus(user, statusKnown, reason)
 }
 
 func banUser(user *User, reason string, messages []*Message) {
@@ -315,6 +234,7 @@ func banUser(user *User, reason string, messages []*Message) {
 	if !config.Dev {
 		post("/banChatMember", params{"chat_id": chatID, "user_id": user.ID}, nil)
 	}
+	setStatus(user, statusBanned, reason)
 }
 
 func getAdmins(chatID int64) map[int64]bool {
@@ -344,7 +264,8 @@ func voteKeyboard(userID int64, approveCount, banCount int) params {
 	}}}
 }
 
-func startVote(msg *Message) {
+// startVote posts the vote on msg, the first message of an unknown user
+func startVote(msg *Message, jev *float64) {
 	user := msg.From
 	fmt.Println("[ VOTE ]", messageStr(msg))
 	mention := strings.TrimSpace(user.FirstName + " " + user.LastName)
@@ -362,41 +283,66 @@ func startVote(msg *Message) {
 		"reply_markup":     voteKeyboard(user.ID, 0, 0),
 	}, &voteMessage)
 
-	votesMu.Lock()
-	defer votesMu.Unlock()
-	pendingVotes[user.ID] = &pendingVote{
-		messages:    []*Message{msg},
-		voteMessage: voteMessage,
-		approve:     map[int64]bool{},
-		ban:         map[int64]bool{},
-		added:       time.Now(),
+	var voteMessageID any
+	if voteMessage != nil {
+		voteMessageID = voteMessage.MessageID
 	}
-}
-
-// resolveVote removes user from pending votes and deletes vote message.
-// Returns pending vote or nil if already resolved by someone else
-func resolveVote(userID int64) *pendingVote {
-	votesMu.Lock()
-	pending := pendingVotes[userID]
-	delete(pendingVotes, userID)
-	votesMu.Unlock()
-
-	if pending == nil {
-		return nil
-	}
-	if voteMessage := pending.voteMessage; voteMessage != nil {
-		post("/deleteMessage", params{"chat_id": voteMessage.Chat.ID, "message_id": voteMessage.MessageID}, nil)
-	}
-	return pending
-}
-
-func anyOf(voters, admins map[int64]bool) bool {
-	for id := range voters {
-		if admins[id] {
-			return true
+	logErr(inTx(func(tx *sql.Tx) error {
+		if err := saveUser(tx, user, "", ""); err != nil {
+			return err
 		}
+		if err := saveMessage(tx, msg, jev, ""); err != nil {
+			return err
+		}
+		_, err := tx.Exec("INSERT INTO votes (user_id, chat_id, vote_message_id, started) VALUES (?, ?, ?, ?)",
+			user.ID, msg.Chat.ID, voteMessageID, now())
+		return err
+	}))
+}
+
+// a vote taken out of the database by closeVote
+type closedVote struct {
+	messages      []*Message
+	chatID        int64
+	voteMessageID *int64 // nil if posting it failed
+}
+
+// closeVote atomically ends user’s vote, settling its messages with outcome.
+// Returns the vote, or nil if there’s none: someone else has closed it.
+// Every vote ends here, so only one of those racing to close it acts on it
+func closeVote(userID int64, outcome string) *closedVote {
+	var vote *closedVote
+	logErr(inTx(func(tx *sql.Tx) error {
+		var v closedVote
+		err := tx.QueryRow("DELETE FROM votes WHERE user_id = ? RETURNING chat_id, vote_message_id", userID).
+			Scan(&v.chatID, &v.voteMessageID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if v.messages, err = openMessages(tx, userID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec("UPDATE messages SET outcome = ? WHERE user_id = ? AND outcome IS NULL", outcome, userID); err != nil {
+			return err
+		}
+		if len(v.messages) > 0 {
+			vote = &v
+		}
+		return nil
+	}))
+	return vote
+}
+
+// resolveVote closes user’s vote and deletes the vote message
+func resolveVote(userID int64, outcome string) *closedVote {
+	vote := closeVote(userID, outcome)
+	if vote != nil && vote.voteMessageID != nil {
+		post("/deleteMessage", params{"chat_id": vote.chatID, "message_id": *vote.voteMessageID}, nil)
 	}
-	return false
+	return vote
 }
 
 func handleCallbackQuery(query *CallbackQuery) {
@@ -410,8 +356,7 @@ func handleCallbackQuery(query *CallbackQuery) {
 
 	action, target, _ := strings.Cut(query.Data, ":")
 	targetID, err := strconv.ParseInt(target, 10, 64)
-	approve := action == "approve"
-	if err != nil || !(approve || action == "ban") || query.Message == nil {
+	if err != nil || !(action == "approve" || action == "ban") || query.Message == nil {
 		answer("")
 		return
 	}
@@ -419,19 +364,23 @@ func handleCallbackQuery(query *CallbackQuery) {
 	chatID := query.Message.Chat.ID
 	fmt.Println("[ VOTED ]", userStr(&query.From), action, targetID)
 
-	votesMu.Lock()
-	pending := pendingVotes[targetID]
-	repeated := pending != nil && (approve && pending.approve[voterID] || !approve && pending.ban[voterID])
-	votesMu.Unlock()
-
+	// the voter’s current side, if any
+	var side sql.NullString
+	err = db.QueryRow("SELECT (SELECT side FROM ballots WHERE user_id = ? AND voter_id = ?) FROM votes WHERE user_id = ?",
+		targetID, voterID, targetID).Scan(&side)
 	switch {
 	// not in progress
-	case pending == nil:
+	case errors.Is(err, sql.ErrNoRows):
+		answer("")
+		return
+
+	case err != nil:
+		logErr(err)
 		answer("")
 		return
 
 	// repeated vote
-	case repeated:
+	case side.String == action:
 		answer("Вы уже проголосовали")
 		return
 	}
@@ -439,42 +388,54 @@ func handleCallbackQuery(query *CallbackQuery) {
 	answer("")
 	admins := getAdmins(chatID)
 
-	votesMu.Lock()
-	pending = pendingVotes[targetID]
-	if pending == nil {
-		// resolved while we were talking to Telegram
-		votesMu.Unlock()
+	var approveCount, banCount int
+	var adminApproved, adminBanned, open bool
+	logErr(inTx(func(tx *sql.Tx) error {
+		// might have been resolved while we were talking to Telegram
+		_, err := tx.Exec(`INSERT INTO ballots (user_id, voter_id, side) SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM votes WHERE user_id = ?)
+			ON CONFLICT DO UPDATE SET side = excluded.side`, targetID, voterID, action, targetID)
+		if err != nil {
+			return err
+		}
+		rows, err := tx.Query("SELECT voter_id, side FROM ballots WHERE user_id = ?", targetID)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var voter int64
+			var side string
+			if err := rows.Scan(&voter, &side); err != nil {
+				return err
+			}
+			open = true
+			if side == "approve" {
+				approveCount++
+				adminApproved = adminApproved || admins[voter]
+			} else {
+				banCount++
+				adminBanned = adminBanned || admins[voter]
+			}
+		}
+		return rows.Err()
+	}))
+	if !open {
 		return
 	}
-	if approve {
-		pending.approve[voterID] = true
-		delete(pending.ban, voterID)
-	} else {
-		pending.ban[voterID] = true
-		delete(pending.approve, voterID)
-	}
-	approveCount, banCount := len(pending.approve), len(pending.ban)
-	adminApproved, adminBanned := anyOf(pending.approve, admins), anyOf(pending.ban, admins)
-	approved := approveCount >= config.VoteLimit || adminApproved
-	banned := banCount >= config.VoteLimit || adminBanned
-	targetUser := pending.messages[0].From
-	votesMu.Unlock()
 
 	reason := "user vote"
 	if adminApproved || adminBanned {
 		reason = "admin vote"
 	}
 	switch {
-	case approved:
-		if pending := resolveVote(targetID); pending != nil {
-			whitelistUser(targetUser)
-			record(notSpamFile, pending.messages)
+	case approveCount >= config.VoteLimit || adminApproved:
+		if vote := resolveVote(targetID, outcomeNotSpam); vote != nil {
+			whitelistUser(vote.messages[0].From, reason)
 		}
 
-	case banned:
-		if pending := resolveVote(targetID); pending != nil {
-			banUser(targetUser, reason, pending.messages)
-			record(voteSpamFile, pending.messages)
+	case banCount >= config.VoteLimit || adminBanned:
+		if vote := resolveVote(targetID, outcomeVoteSpam); vote != nil {
+			banUser(vote.messages[0].From, reason, vote.messages)
 		}
 
 	// update counts
@@ -487,24 +448,35 @@ func handleCallbackQuery(query *CallbackQuery) {
 	}
 }
 
-// collectMessage adds msg to its author’s pending vote, if there is one,
+// collectMessage adds msg to its author’s open vote, if there is one,
 // and returns how many times their most repeated message was posted
-func collectMessage(msg *Message) (maxFreq int, pending bool) {
-	votesMu.Lock()
-	defer votesMu.Unlock()
-	vote := pendingVotes[msg.From.ID]
-	if vote == nil {
-		return 0, false
-	}
-	vote.messages = append(vote.messages, msg)
-	freqs := map[string]int{}
-	for _, m := range vote.messages {
-		if utf8.RuneCountInString(m.Text) > 10 {
-			freqs[m.Text]++
-			maxFreq = max(maxFreq, freqs[m.Text])
+func collectMessage(msg *Message) (maxFreq int, open bool) {
+	logErr(inTx(func(tx *sql.Tx) error {
+		err := tx.QueryRow("SELECT 1 FROM votes WHERE user_id = ?", msg.From.ID).Scan(new(int))
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
 		}
-	}
-	return maxFreq, true
+		if err != nil {
+			return err
+		}
+		open = true
+		if err := saveMessage(tx, msg, nil, ""); err != nil {
+			return err
+		}
+		messages, err := openMessages(tx, msg.From.ID)
+		if err != nil {
+			return err
+		}
+		freqs := map[string]int{}
+		for _, m := range messages {
+			if utf8.RuneCountInString(m.Text) > 10 {
+				freqs[m.Text]++
+				maxFreq = max(maxFreq, freqs[m.Text])
+			}
+		}
+		return nil
+	}))
+	return maxFreq, open
 }
 
 func handleMessage(msg *Message) {
@@ -519,12 +491,11 @@ func handleMessage(msg *Message) {
 		return
 	}
 
-	// pending -- collect messages
-	if maxFreq, pending := collectMessage(msg); pending {
+	// open vote -- collect messages
+	if maxFreq, open := collectMessage(msg); open {
 		if maxFreq >= config.RepeatedMessagesLimit {
-			if pending := resolveVote(user.ID); pending != nil {
-				banUser(user, "repeated messages", pending.messages)
-				record(voteSpamFile, pending.messages)
+			if vote := resolveVote(user.ID, outcomeVoteSpam); vote != nil {
+				banUser(user, "repeated messages", vote.messages)
 			}
 		}
 		return
@@ -535,29 +506,29 @@ func handleMessage(msg *Message) {
 
 	// banned by lols
 	if reason := checkExternal(user.ID); reason != "" {
+		record(outcomeLolsSpam, nil, []*Message{msg})
 		banUser(user, reason, []*Message{msg})
-		record(lolsSpamFile, []*Message{msg})
 		return
 	}
 
 	// spam by jev
 	jev := checkJev(msg)
 	if jev != nil && *jev >= config.JevThreshold {
+		record(outcomeJevSpam, jev, []*Message{msg})
 		banUser(user, "spam by jev", []*Message{msg})
-		record(jevSpamFile, []*Message{msg})
 		return
 	}
 
 	// trusted by jev: an old account writing something Jev is sure is not spam
 	if jev != nil && *jev < config.JevTrustThreshold && trusted(msg) {
 		fmt.Println("[ TRUSTED ]", messageStr(msg))
-		whitelistUser(user)
-		record(jevTrustFile, []*Message{msg})
+		record(outcomeJevTrusted, jev, []*Message{msg})
+		whitelistUser(user, "jev trusted")
 		return
 	}
 
 	// start community vote
-	startVote(msg)
+	startVote(msg, jev)
 }
 
 // trusted tells if msg can skip the vote when Jev is sure it’s not spam.
@@ -576,37 +547,40 @@ func trusted(msg *Message) bool {
 // checkPendingVotes re-checks every user with an open vote: bans if lols.bot
 // now reports them, retracts the vote if user deleted all their messages
 func checkPendingVotes() {
-	votesMu.Lock()
-	snapshot := make(map[int64][]*Message, len(pendingVotes))
-	for userID, pending := range pendingVotes {
-		snapshot[userID] = slices.Clone(pending.messages)
+	userIDs, err := openVotes(time.Now())
+	if err != nil {
+		logErr(err)
+		return
 	}
-	votesMu.Unlock()
-
-	for userID, messages := range snapshot {
+	for _, userID := range userIDs {
+		messages, err := openMessages(db, userID)
+		if err != nil || len(messages) == 0 {
+			logErr(err)
+			continue
+		}
 		user := messages[0].From
 		if reason := checkExternal(userID); reason != "" {
 			// reported as spammer while vote was in progress
-			if pending := resolveVote(userID); pending != nil {
-				banUser(user, reason, pending.messages)
-				record(lolsSpamFile, pending.messages)
+			if vote := resolveVote(userID, outcomeLolsSpam); vote != nil {
+				banUser(user, reason, vote.messages)
 			}
 		} else if !slices.ContainsFunc(messages, messageExists) {
 			// user deleted all their messages -- retract vote, forget user
-			if resolveVote(userID) != nil {
+			if resolveVote(userID, outcomeRetracted) != nil {
 				fmt.Println("[ RETRACTED ]", userStr(user))
 			}
 		}
 	}
 }
 
+// cleanupPendingVotes drops votes older than vote-ttl, leaving
+// the vote message in place and the user unknown
 func cleanupPendingVotes() {
-	votesMu.Lock()
-	defer votesMu.Unlock()
-	for userID, pending := range pendingVotes {
-		if time.Since(pending.added) > config.VoteTTL {
+	userIDs, err := openVotes(time.Now().Add(-config.VoteTTL))
+	logErr(err)
+	for _, userID := range userIDs {
+		if closeVote(userID, outcomeExpired) != nil {
 			fmt.Println("[ CLEANUP ]", userID)
-			delete(pendingVotes, userID)
 		}
 	}
 }
@@ -677,13 +651,38 @@ func poll(offset int64) int64 {
 	return offset
 }
 
+// start opens the database in the data dir, bringing it up to date
+func start() error {
+	if err := os.MkdirAll(config.DataDir, 0o755); err != nil {
+		return err
+	}
+	var err error
+	if db, err = openDB(config.DataDir); err != nil {
+		return err
+	}
+	if err := migrate(config.DataDir); err != nil {
+		return err
+	}
+	knownUsers, err = loadKnownUsers()
+	return err
+}
+
 func Main() {
+	if len(os.Args) > 1 && os.Args[1] == "dump" {
+		err := dump(os.Args[2:], os.Getenv, os.Stdout)
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(0)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	var err error
 	if config, err = loadConfig(os.Args[1:], os.Getenv); err == nil {
-		err = os.MkdirAll(config.DataDir, 0o755)
-	}
-	if err == nil {
-		knownUsers, err = loadKnownUsers(knownUsersPath())
+		err = start()
 	}
 	if errors.Is(err, flag.ErrHelp) {
 		os.Exit(0)

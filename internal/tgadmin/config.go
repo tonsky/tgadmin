@@ -22,7 +22,7 @@ type Config struct {
 	TrustMaxUserID    int64
 	// private group used to probe if messages still exist, bot must be a member
 	DumpGroupID int64
-	// where known_users lives
+	// where the database lives
 	DataDir string
 }
 
@@ -51,7 +51,7 @@ func loadConfig(args []string, getenv func(string) string) (*Config, error) {
 	fs.Float64Var(&c.JevTrustThreshold, "jev-trust-threshold", 0.05, "Jev spam probability below which the user is whitelisted without a vote")
 	fs.Int64Var(&c.TrustMaxUserID, "trust-max-user-id", 5_000_000_000, "only users with lower IDs (older accounts) can skip the vote")
 	fs.Int64Var(&c.DumpGroupID, "dump-group-id", -5016389519, "private group to probe if messages still exist")
-	fs.StringVar(&c.DataDir, "data-dir", ".", "directory for known_users")
+	fs.StringVar(&c.DataDir, "data-dir", ".", "directory for the database, "+dbFile)
 
 	var err error
 	fs.VisitAll(func(f *flag.Flag) {
