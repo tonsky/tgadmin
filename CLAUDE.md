@@ -34,7 +34,7 @@ Pushing to `main` runs the tests and a linux/amd64 build in CI (`.github/workflo
    - `bot_test.go` — tests that run the handlers against a fake Telegram/lols.bot/Jev server
 
 2. **Configuration**:
-   - Settings come from command-line flags and `TGADMIN_*` env vars; a flag wins over its env var, which wins over the default. Each flag `-some-name` has env var `TGADMIN_SOME_NAME`: `-token` (required), `-dev`, `-vote-limit` (default 3), `-vote-ttl` (Go duration, default `24h`), `-repeated-messages-limit` (default 3), `-admin-cache-ttl` (Go duration, default `1h`), `-dump-group-id`, `-jev-api-key` (optional, enables the Jev check), `-jev-threshold` (default 0.7), and `-data-dir` (default `.`), whose env var is `DATA_DIR` without the prefix, because Houston sets it. `tgadmin -h` lists them
+   - Settings come from command-line flags and `TGADMIN_*` env vars; a flag wins over its env var, which wins over the default. Each flag `-some-name` has env var `TGADMIN_SOME_NAME`: `-token` (required), `-dev`, `-vote-limit` (default 3), `-vote-ttl` (Go duration, default `24h`), `-repeated-messages-limit` (default 3), `-admin-cache-ttl` (Go duration, default `1h`), `-dump-group-id`, `-jev-api-key` (optional, enables the Jev check), `-jev-threshold` (default 0.6), and `-data-dir` (default `.`), whose env var is `DATA_DIR` without the prefix, because Houston sets it. `tgadmin -h` lists them
    - `mise.local.toml` — local env vars for development (token, keys, `TGADMIN_DEV`), gitignored
    - `known_users` in the data dir — persistent append-only storage of whitelisted user IDs
    - `lols_spam.jsonl`, `jev_spam.jsonl`, `vote_spam.jsonl` (vote bans and repeated messages), `not_spam.jsonl` (whitelisted after a vote) in the data dir — the checked messages by outcome, one message per line, exactly as Telegram sent it (a ban or whitelist after a vote writes all of the user's collected messages). Written in dev mode too. Meant for tuning the Jev prompt
@@ -68,7 +68,7 @@ Note: the Bot API sends no update when messages are deleted, so deletion is dete
 - `handleMessage` — main entry point for incoming messages
 - `handleCallbackQuery` — processes vote button presses
 - `checkExternal` — queries lols.bot by user ID
-- `checkJev` — asks Jev whether a first message is spam (only text/caption, sender name/username and the replied-to message are sent)
+- `checkJev` — asks Jev whether a first message is spam (only text/caption, hidden link URLs, the forward source, sender name/username and the replied-to message are sent)
 - `startVote` — posts the vote message for a first-time poster
 - `resolveVote` — atomically removes a pending vote and deletes the vote message; every vote outcome goes through it
 - `checkPendingVotes` — the per-minute re-check (lols.bot + deleted-messages probe)

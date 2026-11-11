@@ -152,6 +152,8 @@ var jevURL = "https://api.typesafe.ai/v1/systemone"
 type jevMessage struct {
 	Text           string      `json:"text,omitempty"`
 	Caption        string      `json:"caption,omitempty"`
+	Links          []string    `json:"links,omitempty"`
+	ForwardedFrom  string      `json:"forwarded_from,omitempty"`
 	From           jevUser     `json:"from"`
 	ReplyToMessage *jevMessage `json:"reply_to_message,omitempty"`
 }
@@ -164,10 +166,35 @@ type jevUser struct {
 
 func jevSelect(msg *Message) *jevMessage {
 	res := &jevMessage{Text: msg.Text, Caption: msg.Caption}
+	// URLs hidden behind link text
+	for _, entity := range append(msg.Entities, msg.CaptionEntities...) {
+		if entity.Type == "text_link" {
+			res.Links = append(res.Links, entity.URL)
+		}
+	}
+	if origin := msg.ForwardOrigin; origin != nil {
+		switch {
+		case origin.Chat != nil:
+			res.ForwardedFrom = chatStr(origin.Chat)
+		case origin.SenderChat != nil:
+			res.ForwardedFrom = chatStr(origin.SenderChat)
+		case origin.SenderUser != nil:
+			res.ForwardedFrom = strings.TrimSpace(origin.SenderUser.FirstName + " " + origin.SenderUser.LastName)
+		default:
+			res.ForwardedFrom = origin.SenderUserName
+		}
+	}
 	if from := msg.From; from != nil {
 		res.From = jevUser{from.FirstName, from.LastName, from.Username}
 	}
 	return res
+}
+
+func chatStr(chat *Chat) string {
+	if chat.Username == "" {
+		return chat.Title
+	}
+	return strings.TrimSpace(chat.Title + " @" + chat.Username)
 }
 
 // checkJev returns spam probability of msg, or nil if Jev is off or failed

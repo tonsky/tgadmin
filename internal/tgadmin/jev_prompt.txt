@@ -1,31 +1,47 @@
 Is this Telegram comment part of a spam campaign?
 
-Evaluate the top-level text or caption together with the sender's
-from.first_name, from.last_name, and from.username. reply_to_message
+Evaluate the top-level text or caption together with links,
+forwarded_from, and the sender's from.first_name, from.last_name,
+and from.username. reply_to_message
 provides background; evaluate the current sender and comment.
 
 Recognize these recurring Russian-language spam patterns:
 
-1. Easy-money recruitment:
-A stranger asks for people to perform a simple task today, tomorrow,
-or over the weekend, offering a specific payment for little work.
-Typical payments are 3000–8500 rubles; typical tasks include cleaning
-after renovations or banquets, moving tables, sorting clothes,
-loading toys, or minor repairs. Common wording:
-"кто может помочь", "нужны 3 человека", "ничего сложного",
-"за 2 часа", "отблагодарю", "рассчитаюсь на месте", "пишите в лс".
-A short offer such as "Убрать в актовом зале после ремонта,
-8500 рублей" matches this pattern too.
+1. Money, work, or gifts from strangers:
+A commenter offering money, paid work, a job, or a gift to readers of
+the chat is spam. The offer alone is a very strong signal, whatever
+the amount, the task, or how casual the wording.
+Typical variants: paid help with a simple task today or tomorrow
+(cleaning, moving furniture, "муж на час"); jobs and vague tasks with
+high pay; "товар на пробу" or "бабок сверху" (courier recruitment);
+help closing loans or debts; buying crypto; casino winnings or money
+shared with the first few people who write; giveaways and bonuses
+("ЗВЕЗДНЫЙ БОНУС", "халява").
+Typical wording: "кто может помочь", "нужны люди", "ничего сложного",
+"отблагодарю", "рассчитаюсь на месте", "срочно", "места ограничены",
+"те кто реально готов", "пишите в лс".
 
-2. Audiobook funnels:
-An unsolicited personal testimonial recommends a self-improvement,
-productivity, money, or success book, then offers its audio version.
-Typical titles/authors include "Время — деньги" / Генри Форд and
-"Психология достижений" / Брайан Трейси.
+Text that mixes Cyrillic with look-alike Latin, Greek, or accented
+letters ("парü заðаній", "сπравиться") is deliberate filter evasion
+and a strong spam signal by itself.
+
+2. Book and audiobook funnels:
+A very common campaign. A commenter shares, unprompted, how a book
+about money, business, success, productivity, or self-improvement
+changed their thinking, then offers to send it, usually as an
+audiobook. A stranger offering to send a book or audiobook is spam by
+itself, even when the review sounds sincere and the offer is a short
+aside at the end: "есть аудиоверсия", "могу скинуть", "могу
+переслать", "кому интересно / кому актуально - пишите",
+"безвозмездно", "пишите в личку".
+The opening is usually "Недавно дочитал / послушал / закончил",
+"Сильно зацепила", "Сегодня ехал домой и слушал". Books by famous
+businessmen and financiers, such as "Время — деньги" / Генри Форд or
+"Психология достижений" / Брайан Трейси, are typical.
 Typical wording: "не ожидал, что настолько зайдёт",
 "не про то, как работать больше", "переосмыслить приоритеты",
-"есть аудиоверсия", "могу скинуть", "безвозмездно",
-"пишите в личку". The offer may be indirect: "если что есть аудио".
+"перезагрузили мозг", "по-другому взглянуть на работу".
+The review usually has nothing to do with the discussion it replies to.
 
 3. Promotion through the sender's display name:
 A harmless-looking topical comment attracts attention to an
@@ -57,14 +73,30 @@ Supporting signals include promotional or flirtatious profiles,
 template-like wording, awkward phrasing, and mismatched grammatical
 gender. A comment can be fluent and relevant while serving as spam.
 
-6. Disguised service referrals:
-A conversational reply suddenly recommends a particular provider
-or @account with a canned endorsement: "летает отлично",
-"батарею почти не ест", or a list of promotional selling points.
+6. Service referrals, especially VPNs:
+Recommending a specific VPN, proxy, or other service by name,
+@account, @...bot, or "вбей в поиск X", with a short endorsement:
+"заходит без проблем", "самый стабильный", "летает отлично",
+"батарею почти не ест", "работает без рекламы", or a list of
+promotional selling points. A message that consists only of an
+@mention of a service, sent in reply to a channel post, is spam.
+A reply thanking someone for or praising a service named in
+reply_to_message is part of the same campaign.
+Asking which VPN or protocol to use, or complaining that one is
+broken, is normal and not spam by itself.
 
 7. Bot-link drops:
 One or several @...bot mentions, especially random-looking names,
 with no substantive conversation or with unrelated gibberish.
+
+8. Hidden links and forwarded ads:
+links lists URLs hidden behind words in the text, forwarded_from
+names the channel or user the message was forwarded from.
+A message forwarded from a channel, especially one whose name
+promises freebies or contacts ("Халява тут", "Контакт в посте"),
+is spam. So is a link hidden behind words like "СЮДА" or "НАПИСАТЬ",
+especially one leading to a t.me/...bot. Emoji art or rows of custom
+emoji followed by a call to write or click are ads.
 
 A clear match to any campaign pattern is sufficient. For generic
 engagement, assess the combination of wording and profile signals.

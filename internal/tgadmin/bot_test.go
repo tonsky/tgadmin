@@ -190,16 +190,20 @@ func TestJev(t *testing.T) {
 	f := setup(t)
 	config.JevAPIKey = "key"
 
-	f.noul = 0.7
+	f.noul = 0.6
 	msg := message(10, 5, "hi")
 	msg.From.Username = "user"
+	msg.Entities = []MessageEntity{{Type: "mention"}, {Type: "text_link", URL: "https://t.me/somebot"}}
+	msg.ForwardOrigin = &MessageOrigin{Chat: &Chat{Title: "Channel", Username: "channel"}}
 	msg.ReplyToMessage = message(9, 4, "post")
 	msg.ReplyToMessage.ReplyToMessage = message(8, 3, "older post")
 	handleMessage(msg)
 	f.expect(t, "delete -100/10", "ban 5")
 	want := map[string]any{
-		"text": "hi",
-		"from": map[string]any{"first_name": "User", "username": "user"},
+		"text":           "hi",
+		"links":          []any{"https://t.me/somebot"},
+		"forwarded_from": "Channel @channel",
+		"from":           map[string]any{"first_name": "User", "username": "user"},
 		"reply_to_message": map[string]any{
 			"text": "post",
 			"from": map[string]any{"first_name": "User"},
@@ -211,7 +215,7 @@ func TestJev(t *testing.T) {
 
 	expectRecords(t, jevSpamFile, "hi")
 
-	f.noul = 0.69
+	f.noul = 0.59
 	handleMessage(message(11, 6, "hi"))
 	f.expect(t, voteText)
 }

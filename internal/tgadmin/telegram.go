@@ -23,17 +23,34 @@ type User struct {
 
 type Chat struct {
 	ID       int64  `json:"id"`
+	Title    string `json:"title"`
 	Username string `json:"username"`
 }
 
+// MessageOrigin is any of the forward origin types, they differ in which field is set
+type MessageOrigin struct {
+	SenderUser     *User  `json:"sender_user"`
+	SenderUserName string `json:"sender_user_name"`
+	SenderChat     *Chat  `json:"sender_chat"`
+	Chat           *Chat  `json:"chat"`
+}
+
+type MessageEntity struct {
+	Type string `json:"type"`
+	URL  string `json:"url"`
+}
+
 type Message struct {
-	MessageID      int64    `json:"message_id"`
-	From           *User    `json:"from"`
-	Chat           Chat     `json:"chat"`
-	Text           string   `json:"text"`
-	Caption        string   `json:"caption"`
-	ReplyToMessage *Message `json:"reply_to_message"`
-	NewChatMembers []User   `json:"new_chat_members"`
+	MessageID       int64           `json:"message_id"`
+	From            *User           `json:"from"`
+	Chat            Chat            `json:"chat"`
+	Text            string          `json:"text"`
+	Caption         string          `json:"caption"`
+	Entities        []MessageEntity `json:"entities"`
+	CaptionEntities []MessageEntity `json:"caption_entities"`
+	ForwardOrigin   *MessageOrigin  `json:"forward_origin"`
+	ReplyToMessage  *Message        `json:"reply_to_message"`
+	NewChatMembers  []User          `json:"new_chat_members"`
 	// the message as Telegram sent it, for logs and records
 	raw json.RawMessage
 }

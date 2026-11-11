@@ -44,7 +44,7 @@ func loadConfig(args []string, getenv func(string) string) (*Config, error) {
 	fs.IntVar(&c.RepeatedMessagesLimit, "repeated-messages-limit", 3, "same message posted this many times bans the user")
 	fs.DurationVar(&c.AdminCacheTTL, "admin-cache-ttl", time.Hour, "how long chat admin lists are cached")
 	fs.StringVar(&c.JevAPIKey, "jev-api-key", "", "Jev API key, enables the Jev check")
-	fs.Float64Var(&c.JevThreshold, "jev-threshold", 0.7, "Jev spam probability that bans the user")
+	fs.Float64Var(&c.JevThreshold, "jev-threshold", 0.6, "Jev spam probability that bans the user")
 	fs.Int64Var(&c.DumpGroupID, "dump-group-id", -5016389519, "private group to probe if messages still exist")
 	fs.StringVar(&c.DataDir, "data-dir", ".", "directory for known_users")
 
